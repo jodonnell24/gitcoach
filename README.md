@@ -35,6 +35,15 @@ To force built-in menus even when gum is installed:
 GITCOACH_NO_GUM=1 python3 gitcoach.py
 ```
 
+Interactive menu now includes:
+
+- `Doctor` submenu (scan, set identity, fix email history, promote to main, back)
+- `Status snapshot`
+- `Switch branch`
+- `Sync current branch`
+- `Push current branch`
+- Existing start/save/ship/init flows
+
 Core commands:
 
 ```bash

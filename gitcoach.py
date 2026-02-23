@@ -215,6 +215,44 @@ def list_remotes() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def current_upstream() -> str | None:
+    result = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", check=False)
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return None
+    return value
+
+
+def status_counts() -> tuple[int, int, int]:
+    staged = 0
+    unstaged = 0
+    untracked = 0
+    for raw in git("status", "--porcelain").stdout.splitlines():
+        line = raw.rstrip("\n")
+        if not line:
+            continue
+        if line.startswith("??"):
+            untracked += 1
+            continue
+        if len(line) >= 1 and line[0] != " ":
+            staged += 1
+        if len(line) >= 2 and line[1] != " ":
+            unstaged += 1
+    return staged, unstaged, untracked
+
+
+def ahead_behind(upstream: str) -> tuple[int, int]:
+    result = git("rev-list", "--left-right", "--count", f"{upstream}...HEAD", check=False)
+    if result.returncode != 0:
+        return (0, 0)
+    parts = result.stdout.strip().split()
+    if len(parts) != 2:
+        return (0, 0)
+    behind = int(parts[0])
+    ahead = int(parts[1])
+    return ahead, behind
+
+
 def ensure_clean_worktree() -> None:
     result = git("status", "--porcelain")
     if result.stdout.strip():
@@ -734,6 +772,28 @@ def run_interactive_doctor_scan() -> None:
     command_doctor(make_doctor_args())
 
 
+def run_interactive_doctor_set_identity() -> None:
+    ensure_git_repo()
+    current_name = get_config("user.name") or ""
+    current_email = get_config("user.email") or ""
+    name = prompt_text("Git user.name", default=current_name or None, required=True)
+    email = prompt_text("Git user.email", default=current_email or None, required=True)
+    scope = choose_option(
+        "Identity scope",
+        ["Global (all repos)", "Local (this repo only)"],
+        allow_cancel=False,
+    )
+
+    if scope == "Global (all repos)":
+        git("config", "--global", "user.name", name)
+        git("config", "--global", "user.email", email)
+        print(f"[ok] Updated global identity: {name} <{email}>")
+    else:
+        git("config", "user.name", name)
+        git("config", "user.email", email)
+        print(f"[ok] Updated local identity: {name} <{email}>")
+
+
 def run_interactive_doctor_fix() -> None:
     ensure_git_repo()
     history_counts = collect_history_emails()
@@ -905,6 +965,81 @@ def run_interactive_init() -> None:
     command_init(argparse.Namespace(main_branch=main_branch, dev_branch=dev_branch))
 
 
+def run_interactive_status_snapshot() -> None:
+    ensure_git_repo()
+    branch = current_branch()
+    staged, unstaged, untracked = status_counts()
+    upstream = current_upstream()
+    remote_info = "none"
+    if upstream:
+        ahead, behind = ahead_behind(upstream)
+        remote_info = f"{upstream} (ahead {ahead}, behind {behind})"
+
+    lines = [
+        f"branch: {branch}",
+        f"upstream: {remote_info}",
+        f"staged files: {staged}",
+        f"unstaged files: {unstaged}",
+        f"untracked files: {untracked}",
+    ]
+    print_box("Status snapshot", lines)
+
+
+def run_interactive_switch_branch() -> None:
+    ensure_git_repo()
+    branches = list_local_branches()
+    if not branches:
+        raise GitCoachError("No local branches found.")
+
+    current = current_branch()
+    options = [b for b in branches if b != current] + [current]
+    target = choose_option("Choose branch to checkout", options, allow_cancel=False)
+    if target == current:
+        print(f"[ok] Already on {current}")
+        return
+    git("checkout", target, capture=False)
+    print(f"[ok] Switched to {target}")
+
+
+def run_interactive_sync_current_branch() -> None:
+    ensure_git_repo()
+    branch = current_branch()
+    upstream = current_upstream()
+
+    if upstream:
+        print(f"[info] Fetching and rebasing {branch} against {upstream}")
+        remote_name = upstream.split("/", 1)[0]
+        git("fetch", remote_name, capture=False)
+        git("pull", "--rebase", "--autostash", capture=False)
+        print("[ok] Sync complete")
+        return
+
+    remotes = list_remotes()
+    if not remotes:
+        raise GitCoachError("No remotes configured for this repository.")
+    remote = choose_option("No upstream set. Choose remote", remotes, allow_cancel=False)
+    print(f"[info] Fetching {remote}. Branch has no upstream, so pull is skipped.")
+    git("fetch", remote, capture=False)
+    print("[ok] Fetch complete")
+
+
+def run_interactive_push_current_branch() -> None:
+    ensure_git_repo()
+    branch = current_branch()
+    upstream = current_upstream()
+    if upstream:
+        git("push", capture=False)
+        print(f"[ok] Pushed {branch} to {upstream}")
+        return
+
+    remotes = list_remotes()
+    if not remotes:
+        raise GitCoachError("No remotes configured for this repository.")
+    remote = choose_option("No upstream set. Choose remote for push", remotes, allow_cancel=False)
+    git("push", "-u", remote, branch, capture=False)
+    print(f"[ok] Pushed {branch} to {remote}/{branch} and set upstream")
+
+
 def interactive_context_lines() -> list[str]:
     repo_root = git("rev-parse", "--show-toplevel").stdout.strip()
     branch = current_branch()
@@ -919,12 +1054,50 @@ def interactive_context_lines() -> list[str]:
     ]
 
 
+def command_interactive_doctor_menu() -> None:
+    actions = [
+        "Scan identity issues",
+        "Set git identity (name/email)",
+        "Fix email history",
+        "Promote branch to main",
+        "Back to main menu",
+    ]
+    dispatch = {
+        "Scan identity issues": run_interactive_doctor_scan,
+        "Set git identity (name/email)": run_interactive_doctor_set_identity,
+        "Fix email history": run_interactive_doctor_fix,
+        "Promote branch to main": run_interactive_promote_main,
+    }
+
+    while True:
+        try:
+            picked = choose_option("Doctor actions", actions, allow_cancel=True)
+        except UserCancelled:
+            return
+
+        if picked == "Back to main menu":
+            return
+
+        action = dispatch[picked]
+        try:
+            action()
+        except UserCancelled:
+            print("[info] Doctor action cancelled.")
+        except GitCoachError as err:
+            print(f"[error] {err}")
+
+        if not prompt_confirm("Run another Doctor action?", default=True):
+            return
+
+
 def command_interactive(_args: argparse.Namespace) -> int:
     ensure_git_repo()
     actions = [
-        "Doctor: Scan identity issues",
-        "Doctor: Fix email history",
-        "Doctor: Promote branch to main",
+        "Doctor",
+        "Status snapshot",
+        "Switch branch",
+        "Sync current branch",
+        "Push current branch",
         "Start feature branch",
         "Save commit",
         "Ship dev -> main",
@@ -933,9 +1106,11 @@ def command_interactive(_args: argparse.Namespace) -> int:
     ]
 
     dispatch = {
-        "Doctor: Scan identity issues": run_interactive_doctor_scan,
-        "Doctor: Fix email history": run_interactive_doctor_fix,
-        "Doctor: Promote branch to main": run_interactive_promote_main,
+        "Doctor": command_interactive_doctor_menu,
+        "Status snapshot": run_interactive_status_snapshot,
+        "Switch branch": run_interactive_switch_branch,
+        "Sync current branch": run_interactive_sync_current_branch,
+        "Push current branch": run_interactive_push_current_branch,
         "Start feature branch": run_interactive_start_feature,
         "Save commit": run_interactive_save_commit,
         "Ship dev -> main": run_interactive_ship,
@@ -963,6 +1138,9 @@ def command_interactive(_args: argparse.Namespace) -> int:
             print("[info] Action cancelled.")
         except GitCoachError as err:
             print(f"[error] {err}")
+
+        if picked == "Doctor":
+            continue
 
         if not prompt_confirm("Run another action?", default=True):
             return 0
