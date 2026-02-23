@@ -18,6 +18,20 @@ class GitCoachError(Exception):
     """Raised for expected gitcoach usage/runtime errors."""
 
 
+class UserCancelled(Exception):
+    """Raised when a user cancels an interactive prompt."""
+
+
+def safe_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as err:
+        raise UserCancelled from err
+    except KeyboardInterrupt as err:
+        print("")
+        raise UserCancelled from err
+
+
 def run(
     cmd: list[str],
     *,
@@ -100,6 +114,16 @@ def get_config(key: str) -> str | None:
     return value if value else None
 
 
+def list_local_branches() -> list[str]:
+    result = git("for-each-ref", "--format=%(refname:short)", "refs/heads", check=False)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def list_remotes() -> list[str]:
+    result = git("remote", check=False)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def ensure_clean_worktree() -> None:
     result = git("status", "--porcelain")
     if result.stdout.strip():
@@ -132,6 +156,115 @@ def pick_main_branch(preferred: str) -> str:
         if branch_exists(candidate):
             return candidate
     return preferred
+
+
+def prompt_text(prompt: str, *, default: str | None = None, required: bool = False) -> str:
+    while True:
+        suffix = f" [{default}]" if default else ""
+        value = safe_input(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        if default is not None:
+            return default
+        if not required:
+            return ""
+        print("[warn] Value is required.")
+
+
+def prompt_confirm(prompt: str, *, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    while True:
+        raw = safe_input(f"{prompt} [{hint}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("[warn] Enter y or n.")
+
+
+def choose_option(prompt: str, options: list[str], *, allow_cancel: bool = True) -> str:
+    if not options:
+        raise GitCoachError(f"No options available for: {prompt}")
+
+    while True:
+        print(f"\n{prompt}")
+        search_hint = "Search text (blank=all"
+        if allow_cancel:
+            search_hint += ", q=cancel"
+        search_hint += ")"
+        query = safe_input(f"{search_hint}: ").strip()
+        if allow_cancel and query.lower() in {"q", "quit", "cancel", "back"}:
+            raise UserCancelled
+
+        filtered = options
+        if query:
+            lowered = query.lower()
+            filtered = [item for item in options if lowered in item.lower()]
+
+        if not filtered:
+            print("[warn] No matches. Try another search.")
+            continue
+
+        for idx, item in enumerate(filtered, start=1):
+            print(f"  {idx}. {item}")
+
+        choice_prompt = "Choose number"
+        if allow_cancel:
+            choice_prompt += " (or q to cancel)"
+        raw_choice = safe_input(f"{choice_prompt}: ").strip().lower()
+        if allow_cancel and raw_choice in {"q", "quit", "cancel", "back"}:
+            raise UserCancelled
+        if not raw_choice.isdigit():
+            print("[warn] Enter a number from the list.")
+            continue
+
+        idx = int(raw_choice)
+        if idx < 1 or idx > len(filtered):
+            print("[warn] Number out of range.")
+            continue
+        return filtered[idx - 1]
+
+
+def choose_multiple_options(prompt: str, options: list[str]) -> list[str]:
+    selected: list[str] = []
+    remaining = list(options)
+    while remaining:
+        title = prompt
+        if selected:
+            title += f" (selected {len(selected)}, q=done)"
+        try:
+            picked = choose_option(title, remaining, allow_cancel=True)
+        except UserCancelled:
+            break
+        selected.append(picked)
+        remaining = [item for item in remaining if item != picked]
+        if not remaining:
+            break
+        if not prompt_confirm("Select another?", default=False):
+            break
+    return selected
+
+
+def make_doctor_args(**overrides: object) -> argparse.Namespace:
+    payload: dict[str, object] = {
+        "target_email": None,
+        "target_name": None,
+        "old_email": [],
+        "fix_email_history": False,
+        "promote_main": False,
+        "promote_source": None,
+        "main_branch": "main",
+        "remote": "origin",
+        "set_github_default": True,
+        "yes": False,
+        "push": False,
+    }
+    payload.update(overrides)
+    if payload.get("old_email") is None:
+        payload["old_email"] = []
+    return argparse.Namespace(**payload)
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -369,7 +502,7 @@ def prompt_confirm_history_rewrite(target_email: str, old_emails: list[str], bac
     print(f"[warn] A backup branch was created: {backup_branch}")
     print("[warn] You will need force-push to update remotes.")
     print(f"[warn] Rewrite plan: {len(old_emails)} email(s) -> {target_email}")
-    typed = input("Type REWRITE to continue: ").strip()
+    typed = safe_input("Type REWRITE to continue: ").strip()
     if typed != "REWRITE":
         raise GitCoachError("Cancelled.")
 
@@ -389,7 +522,7 @@ def prompt_confirm_promote_main(
         print(
             f"[warn] Remote {remote_name} will be updated (force push {main_branch})."
         )
-    typed = input("Type PROMOTE to continue: ").strip()
+    typed = safe_input("Type PROMOTE to continue: ").strip()
     if typed != "PROMOTE":
         raise GitCoachError("Cancelled.")
 
@@ -494,6 +627,221 @@ def maybe_set_github_default_branch(
         return
 
     print(f"[ok] Updated GitHub default branch to {main_branch} for {slug}")
+
+
+def run_interactive_doctor_scan() -> None:
+    command_doctor(make_doctor_args())
+
+
+def run_interactive_doctor_fix() -> None:
+    ensure_git_repo()
+    history_counts = collect_history_emails()
+
+    configured_email = (get_config("user.email") or "").strip().lower()
+    configured_name = (get_config("user.name") or "").strip()
+    target_email = prompt_text(
+        "Target email for contributions",
+        default=configured_email or None,
+        required=True,
+    ).lower()
+    target_name = prompt_text(
+        "Target commit name",
+        default=configured_name or "Git User",
+        required=True,
+    )
+
+    old_emails: list[str] = []
+    mismatched = sorted([email for email in history_counts if email.lower() != target_email.lower()])
+    if mismatched:
+        mode = choose_option(
+            "Rewrite scope",
+            [
+                "Rewrite all mismatched emails",
+                "Select specific old emails",
+            ],
+            allow_cancel=False,
+        )
+        if mode == "Select specific old emails":
+            old_emails = choose_multiple_options("Pick old email(s) to rewrite", mismatched)
+            if not old_emails:
+                raise UserCancelled
+
+    push = prompt_confirm("Push rewritten history right away?", default=False)
+    promote_main = prompt_confirm("Also promote a branch to main?", default=False)
+
+    promote_source: str | None = None
+    main_branch = pick_main_branch("main")
+    remote = "origin"
+    set_github_default = True
+    if promote_main:
+        branches = list_local_branches()
+        if not branches:
+            raise GitCoachError("No local branches found to promote.")
+        promote_source = choose_option("Choose source branch to promote", branches, allow_cancel=False)
+        main_branch = prompt_text("Main branch name", default=main_branch, required=True)
+        remotes = list_remotes()
+        if remotes:
+            remote = choose_option("Choose remote", remotes, allow_cancel=False)
+        else:
+            remote = prompt_text("Remote name", default="origin", required=True)
+        if push:
+            set_github_default = prompt_confirm(
+                "Try setting GitHub default branch via gh CLI?",
+                default=True,
+            )
+
+    print("\nPlanned action:")
+    print(f"  - target email: {target_email}")
+    print(f"  - target name:  {target_name}")
+    if old_emails:
+        print(f"  - specific old emails: {', '.join(old_emails)}")
+    else:
+        print("  - old emails: auto-select all mismatches")
+    print(f"  - push: {push}")
+    print(f"  - promote main: {promote_main}")
+    if promote_main:
+        print(f"  - promote source: {promote_source}")
+        print(f"  - main branch: {main_branch}")
+        print(f"  - remote: {remote}")
+        if push:
+            print(f"  - set github default: {set_github_default}")
+
+    if not prompt_confirm("Run this now?", default=True):
+        raise UserCancelled
+
+    command_doctor(
+        make_doctor_args(
+            target_email=target_email,
+            target_name=target_name,
+            old_email=old_emails,
+            fix_email_history=True,
+            promote_main=promote_main,
+            promote_source=promote_source,
+            main_branch=main_branch,
+            remote=remote,
+            set_github_default=set_github_default,
+            yes=True,
+            push=push,
+        )
+    )
+
+
+def run_interactive_promote_main() -> None:
+    ensure_git_repo()
+    branches = list_local_branches()
+    if not branches:
+        raise GitCoachError("No local branches found to promote.")
+
+    source = choose_option("Choose branch to promote to main", branches, allow_cancel=False)
+    main_branch = prompt_text("Main branch name", default=pick_main_branch("main"), required=True)
+    remotes = list_remotes()
+    if remotes:
+        remote = choose_option("Choose remote", remotes, allow_cancel=False)
+    else:
+        remote = prompt_text("Remote name", default="origin", required=True)
+    push = prompt_confirm("Push promoted branch to remote?", default=True)
+    set_default = push and prompt_confirm(
+        "Try setting GitHub default branch via gh CLI?",
+        default=True,
+    )
+
+    print("\nPlanned promote action:")
+    print(f"  - source: {source}")
+    print(f"  - main branch: {main_branch}")
+    print(f"  - remote: {remote}")
+    print(f"  - push: {push}")
+    if push:
+        print(f"  - set github default: {set_default}")
+
+    if not prompt_confirm("Run this now?", default=True):
+        raise UserCancelled
+
+    command_doctor(
+        make_doctor_args(
+            promote_main=True,
+            promote_source=source,
+            main_branch=main_branch,
+            remote=remote,
+            set_github_default=set_default,
+            yes=True,
+            push=push,
+        )
+    )
+
+
+def run_interactive_start_feature() -> None:
+    ensure_git_repo()
+    feature_name = prompt_text("Feature name", required=True)
+    dev_branch = prompt_text("Dev branch", default="dev", required=True)
+    command_start(argparse.Namespace(feature_name=feature_name, dev_branch=dev_branch))
+
+
+def run_interactive_save_commit() -> None:
+    ensure_git_repo()
+    message = prompt_text("Commit message", required=True)
+    include_untracked = prompt_confirm("Include untracked files?", default=False)
+    command_save(argparse.Namespace(message=message, include_untracked=include_untracked))
+
+
+def run_interactive_ship() -> None:
+    ensure_git_repo()
+    main_branch = prompt_text("Main branch", default=pick_main_branch("main"), required=True)
+    dev_branch = prompt_text("Dev branch", default="dev", required=True)
+    push = prompt_confirm("Push to origin after merge?", default=False)
+    command_ship(argparse.Namespace(main_branch=main_branch, dev_branch=dev_branch, push=push))
+
+
+def run_interactive_init() -> None:
+    ensure_git_repo()
+    main_branch = prompt_text("Main branch", default=pick_main_branch("main"), required=True)
+    dev_branch = prompt_text("Dev branch", default="dev", required=True)
+    command_init(argparse.Namespace(main_branch=main_branch, dev_branch=dev_branch))
+
+
+def command_interactive(_args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    actions = [
+        "Doctor: Scan identity issues",
+        "Doctor: Fix email history",
+        "Doctor: Promote branch to main",
+        "Start feature branch",
+        "Save commit",
+        "Ship dev -> main",
+        "Init repo defaults",
+        "Exit",
+    ]
+
+    dispatch = {
+        "Doctor: Scan identity issues": run_interactive_doctor_scan,
+        "Doctor: Fix email history": run_interactive_doctor_fix,
+        "Doctor: Promote branch to main": run_interactive_promote_main,
+        "Start feature branch": run_interactive_start_feature,
+        "Save commit": run_interactive_save_commit,
+        "Ship dev -> main": run_interactive_ship,
+        "Init repo defaults": run_interactive_init,
+    }
+
+    print("gitcoach interactive mode")
+    print("Search, pick, and run without memorizing flags.")
+    while True:
+        try:
+            picked = choose_option("Select an action", actions, allow_cancel=True)
+        except UserCancelled:
+            return 0
+
+        if picked == "Exit":
+            return 0
+
+        action = dispatch[picked]
+        try:
+            action()
+        except UserCancelled:
+            print("[info] Action cancelled.")
+        except GitCoachError as err:
+            print(f"[error] {err}")
+
+        if not prompt_confirm("Run another action?", default=True):
+            return 0
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -606,7 +954,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gitcoach",
         description="Opinionated Git helpers for solo developers.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     p_init = subparsers.add_parser("init", help="Bootstrap branches and config.")
     p_init.add_argument("--main-branch", default="main")
@@ -628,6 +976,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ship.add_argument("--dev-branch", default="dev")
     p_ship.add_argument("--push", action="store_true")
     p_ship.set_defaults(func=command_ship)
+
+    p_interactive = subparsers.add_parser(
+        "interactive",
+        aliases=["menu"],
+        help="Searchable menu for common GitCoach workflows.",
+    )
+    p_interactive.set_defaults(func=command_interactive)
 
     p_doctor = subparsers.add_parser(
         "doctor",
@@ -682,7 +1037,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if getattr(args, "command", None) is None:
+            return command_interactive(argparse.Namespace())
         return args.func(args)
+    except UserCancelled:
+        print("[info] Cancelled.")
+        return 130
     except GitCoachError as err:
         print(f"[error] {err}", file=sys.stderr)
         return 2

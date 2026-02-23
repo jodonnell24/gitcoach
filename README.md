@@ -19,6 +19,14 @@ Run via:
 python3 gitcoach.py <command> [flags]
 ```
 
+No-flag interactive menu (search + select):
+
+```bash
+python3 gitcoach.py
+# or
+python3 gitcoach.py interactive
+```
+
 Core commands:
 
 ```bash
@@ -27,6 +35,7 @@ python3 gitcoach.py start "my feature"
 python3 gitcoach.py save "commit message"
 python3 gitcoach.py ship --push
 python3 gitcoach.py doctor
+python3 gitcoach.py interactive
 ```
 
 ## Contribution Email Fix
