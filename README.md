@@ -27,6 +27,14 @@ python3 gitcoach.py
 python3 gitcoach.py interactive
 ```
 
+If [`gum`](https://github.com/charmbracelet/gum) is installed, the menu automatically uses `gum filter` for fuzzy selection, and falls back to the built-in menu if gum errors.
+
+To force built-in menus even when gum is installed:
+
+```bash
+GITCOACH_NO_GUM=1 python3 gitcoach.py
+```
+
 Core commands:
 
 ```bash

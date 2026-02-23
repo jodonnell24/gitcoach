@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import re
 import shlex
 import shutil
@@ -30,6 +31,96 @@ def safe_input(prompt: str) -> str:
     except KeyboardInterrupt as err:
         print("")
         raise UserCancelled from err
+
+
+def is_interactive_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def color_enabled() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    if os.getenv("NO_COLOR"):
+        return False
+    term = os.getenv("TERM", "")
+    return term.lower() not in {"", "dumb"}
+
+
+def style_text(text: str, *, color: str | None = None, bold: bool = False, dim: bool = False) -> str:
+    if not color_enabled():
+        return text
+
+    color_codes = {
+        "red": "31",
+        "green": "32",
+        "yellow": "33",
+        "blue": "34",
+        "magenta": "35",
+        "cyan": "36",
+        "gray": "90",
+    }
+    parts: list[str] = []
+    if bold:
+        parts.append("1")
+    if dim:
+        parts.append("2")
+    if color and color in color_codes:
+        parts.append(color_codes[color])
+    if not parts:
+        return text
+    return f"\033[{';'.join(parts)}m{text}\033[0m"
+
+
+def print_rule(char: str = "-", width: int = 70) -> None:
+    print(style_text(char * width, color="gray", dim=True))
+
+
+def print_box(title: str, lines: list[str]) -> None:
+    width = max(52, len(title) + 6, *(len(line) + 4 for line in lines)) if lines else max(52, len(title) + 6)
+    top = "+" + "-" * (width - 2) + "+"
+    print(style_text(top, color="cyan"))
+    print(style_text(f"| {title.ljust(width - 4)} |", color="cyan", bold=True))
+    print(style_text(top, color="cyan"))
+    for line in lines:
+        print(f"| {line.ljust(width - 4)} |")
+    print(style_text(top, color="cyan"))
+
+
+def prompt_label(text: str) -> str:
+    return style_text(text, color="blue", bold=True)
+
+
+def can_use_gum() -> bool:
+    if os.getenv("GITCOACH_NO_GUM"):
+        return False
+    return is_interactive_tty() and shutil.which("gum") is not None
+
+
+def choose_option_with_gum(prompt: str, options: list[str], *, allow_cancel: bool = True) -> str:
+    # Pass options as argv so gum keeps stdin connected to the user's TTY.
+    # Capturing only stdout lets us read the selected value while still rendering UI.
+    result = subprocess.run(
+        ["gum", "filter", "--placeholder", prompt, *options],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        if allow_cancel:
+            raise UserCancelled
+        detail = (result.stderr or result.stdout or "").strip()
+        raise GitCoachError(detail or "No selection made.")
+
+    picked = (result.stdout or "").strip()
+    if not picked:
+        if allow_cancel:
+            raise UserCancelled
+        raise GitCoachError("No selection made.")
+    if picked not in options:
+        if allow_cancel:
+            raise UserCancelled
+        raise GitCoachError("Invalid selection.")
+    return picked
 
 
 def run(
@@ -161,7 +252,7 @@ def pick_main_branch(preferred: str) -> str:
 def prompt_text(prompt: str, *, default: str | None = None, required: bool = False) -> str:
     while True:
         suffix = f" [{default}]" if default else ""
-        value = safe_input(f"{prompt}{suffix}: ").strip()
+        value = safe_input(f"{prompt_label(prompt)}{suffix}: ").strip()
         if value:
             return value
         if default is not None:
@@ -174,7 +265,7 @@ def prompt_text(prompt: str, *, default: str | None = None, required: bool = Fal
 def prompt_confirm(prompt: str, *, default: bool = False) -> bool:
     hint = "Y/n" if default else "y/N"
     while True:
-        raw = safe_input(f"{prompt} [{hint}]: ").strip().lower()
+        raw = safe_input(f"{prompt_label(prompt)} [{hint}]: ").strip().lower()
         if not raw:
             return default
         if raw in {"y", "yes"}:
@@ -188,13 +279,21 @@ def choose_option(prompt: str, options: list[str], *, allow_cancel: bool = True)
     if not options:
         raise GitCoachError(f"No options available for: {prompt}")
 
+    if can_use_gum():
+        print(style_text(f"\n{prompt}", color="magenta", bold=True))
+        print(style_text("Type to filter, Enter to select, Esc/Ctrl+C to cancel.", color="gray", dim=True))
+        try:
+            return choose_option_with_gum(prompt, options, allow_cancel=allow_cancel)
+        except GitCoachError as err:
+            print(f"[warn] gum selection failed, falling back to built-in menu: {err}")
+
     while True:
-        print(f"\n{prompt}")
+        print(style_text(f"\n{prompt}", color="magenta", bold=True))
         search_hint = "Search text (blank=all"
         if allow_cancel:
             search_hint += ", q=cancel"
         search_hint += ")"
-        query = safe_input(f"{search_hint}: ").strip()
+        query = safe_input(f"{prompt_label(search_hint)}: ").strip()
         if allow_cancel and query.lower() in {"q", "quit", "cancel", "back"}:
             raise UserCancelled
 
@@ -207,13 +306,15 @@ def choose_option(prompt: str, options: list[str], *, allow_cancel: bool = True)
             print("[warn] No matches. Try another search.")
             continue
 
+        print_rule()
         for idx, item in enumerate(filtered, start=1):
-            print(f"  {idx}. {item}")
+            print(f"  {style_text(str(idx) + '.', color='cyan', bold=True)} {item}")
+        print_rule()
 
         choice_prompt = "Choose number"
         if allow_cancel:
             choice_prompt += " (or q to cancel)"
-        raw_choice = safe_input(f"{choice_prompt}: ").strip().lower()
+        raw_choice = safe_input(f"{prompt_label(choice_prompt)}: ").strip().lower()
         if allow_cancel and raw_choice in {"q", "quit", "cancel", "back"}:
             raise UserCancelled
         if not raw_choice.isdigit():
@@ -502,7 +603,7 @@ def prompt_confirm_history_rewrite(target_email: str, old_emails: list[str], bac
     print(f"[warn] A backup branch was created: {backup_branch}")
     print("[warn] You will need force-push to update remotes.")
     print(f"[warn] Rewrite plan: {len(old_emails)} email(s) -> {target_email}")
-    typed = safe_input("Type REWRITE to continue: ").strip()
+    typed = safe_input(f"{prompt_label('Type REWRITE to continue')}: ").strip()
     if typed != "REWRITE":
         raise GitCoachError("Cancelled.")
 
@@ -522,7 +623,7 @@ def prompt_confirm_promote_main(
         print(
             f"[warn] Remote {remote_name} will be updated (force push {main_branch})."
         )
-    typed = safe_input("Type PROMOTE to continue: ").strip()
+    typed = safe_input(f"{prompt_label('Type PROMOTE to continue')}: ").strip()
     if typed != "PROMOTE":
         raise GitCoachError("Cancelled.")
 
@@ -690,21 +791,24 @@ def run_interactive_doctor_fix() -> None:
                 default=True,
             )
 
-    print("\nPlanned action:")
-    print(f"  - target email: {target_email}")
-    print(f"  - target name:  {target_name}")
+    plan_lines = [
+        f"target email: {target_email}",
+        f"target name:  {target_name}",
+    ]
     if old_emails:
-        print(f"  - specific old emails: {', '.join(old_emails)}")
+        plan_lines.append(f"specific old emails: {', '.join(old_emails)}")
     else:
-        print("  - old emails: auto-select all mismatches")
-    print(f"  - push: {push}")
-    print(f"  - promote main: {promote_main}")
+        plan_lines.append("old emails: auto-select all mismatches")
+    plan_lines.append(f"push: {push}")
+    plan_lines.append(f"promote main: {promote_main}")
     if promote_main:
-        print(f"  - promote source: {promote_source}")
-        print(f"  - main branch: {main_branch}")
-        print(f"  - remote: {remote}")
+        plan_lines.append(f"promote source: {promote_source}")
+        plan_lines.append(f"main branch: {main_branch}")
+        plan_lines.append(f"remote: {remote}")
         if push:
-            print(f"  - set github default: {set_github_default}")
+            plan_lines.append(f"set github default: {set_github_default}")
+
+    print_box("Planned action", plan_lines)
 
     if not prompt_confirm("Run this now?", default=True):
         raise UserCancelled
@@ -745,13 +849,16 @@ def run_interactive_promote_main() -> None:
         default=True,
     )
 
-    print("\nPlanned promote action:")
-    print(f"  - source: {source}")
-    print(f"  - main branch: {main_branch}")
-    print(f"  - remote: {remote}")
-    print(f"  - push: {push}")
+    plan_lines = [
+        f"source: {source}",
+        f"main branch: {main_branch}",
+        f"remote: {remote}",
+        f"push: {push}",
+    ]
     if push:
-        print(f"  - set github default: {set_default}")
+        plan_lines.append(f"set github default: {set_default}")
+
+    print_box("Planned promote action", plan_lines)
 
     if not prompt_confirm("Run this now?", default=True):
         raise UserCancelled
@@ -798,6 +905,20 @@ def run_interactive_init() -> None:
     command_init(argparse.Namespace(main_branch=main_branch, dev_branch=dev_branch))
 
 
+def interactive_context_lines() -> list[str]:
+    repo_root = git("rev-parse", "--show-toplevel").stdout.strip()
+    branch = current_branch()
+    status_lines = git("status", "--porcelain").stdout.splitlines()
+    dirty = "dirty" if status_lines else "clean"
+    menu_backend = "gum filter" if can_use_gum() else "built-in"
+    return [
+        f"Repo:   {repo_root}",
+        f"Branch: {branch}",
+        f"State:  {dirty}",
+        f"Menu:   {menu_backend}",
+    ]
+
+
 def command_interactive(_args: argparse.Namespace) -> int:
     ensure_git_repo()
     actions = [
@@ -821,8 +942,11 @@ def command_interactive(_args: argparse.Namespace) -> int:
         "Init repo defaults": run_interactive_init,
     }
 
-    print("gitcoach interactive mode")
-    print("Search, pick, and run without memorizing flags.")
+    print_box(
+        "gitcoach interactive mode",
+        interactive_context_lines()
+        + ["", "Search, pick, and run without memorizing flags."],
+    )
     while True:
         try:
             picked = choose_option("Select an action", actions, allow_cancel=True)
