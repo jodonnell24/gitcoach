@@ -2,6 +2,8 @@
 
 Small, opinionated Git helper for solo developers.
 
+![GitCoach mascot](gitcoach-mascot.svg)
+
 ## Why
 
 `gitcoach` focuses on common pain points:
@@ -15,6 +17,12 @@ Small, opinionated Git helper for solo developers.
 ## Commands
 
 Run via:
+
+```bash
+gitcoach <command> [flags]
+```
+
+During development you can still run:
 
 ```bash
 python3 gitcoach.py <command> [flags]
@@ -64,6 +72,20 @@ python3 gitcoach.py doctor
 python3 gitcoach.py interactive
 ```
 
+## Installation
+
+From PyPI:
+
+```bash
+pipx install gitcoach
+```
+
+From local checkout:
+
+```bash
+pipx install .
+```
+
 ## Commit Message Help
 
 Draft suggestions:
@@ -83,6 +105,23 @@ Optional strict check:
 
 ```bash
 python3 gitcoach.py save --guided --strict-message
+```
+
+## 60-Second Quickstart
+
+Install with pipx:
+
+```bash
+pipx install gitcoach
+```
+
+Try a safe beginner flow:
+
+```bash
+gitcoach init
+gitcoach start "my first change"
+gitcoach save --guided
+gitcoach ship
 ```
 
 ## Safety Guards
