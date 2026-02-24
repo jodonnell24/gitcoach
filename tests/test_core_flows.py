@@ -206,3 +206,46 @@ def test_save_respects_strict_untracked_policy(tmp_path: Path, monkeypatch) -> N
                 strict_message=False,
             )
         )
+
+
+def test_interactive_fix_suggestions_are_actionable() -> None:
+    blocked = gitcoach.interactive_fix_suggestions(
+        "Untracked files detected and policy is `block`."
+    )
+    assert any(".gitignore" in item for item in blocked)
+    assert any("Adjust safety settings" in item for item in blocked)
+
+    generic = gitcoach.interactive_fix_suggestions("Something unexpected happened")
+    assert generic
+    assert "Check repo status" in generic[0]
+
+
+def test_goal_help_lines_cover_primary_goals() -> None:
+    skip = {gitcoach.GOAL_MORE, gitcoach.GOAL_EXIT}
+    for goal in gitcoach.INTERACTIVE_MAIN_ACTIONS:
+        if goal in skip:
+            continue
+        lines = gitcoach.goal_help_lines(goal)
+        assert lines is not None
+        assert len(lines) >= 2
+        assert all(item.strip() for item in lines)
+
+
+def test_interactive_fix_suggestions_cover_common_failures() -> None:
+    no_upstream = gitcoach.interactive_fix_suggestions("fatal: no upstream configured for branch")
+    assert any("Push current branch only" in item for item in no_upstream)
+    assert any(gitcoach.GOAL_SHARE_GITHUB in item for item in no_upstream)
+
+    push_rejected = gitcoach.interactive_fix_suggestions("! [rejected] main -> main (non-fast-forward)")
+    assert any(gitcoach.GOAL_SHARE_GITHUB in item for item in push_rejected)
+
+    dirty_push = gitcoach.interactive_fix_suggestions("Push blocked: working tree has local changes.")
+    assert any(gitcoach.GOAL_SAVE_CHANGES in item for item in dirty_push)
+
+    main_blocked = gitcoach.interactive_fix_suggestions("Commit blocked on main.")
+    assert any(gitcoach.GOAL_START_WORK in item for item in main_blocked)
+
+
+def test_no_deprecated_interactive_phrase() -> None:
+    source = Path(gitcoach.__file__).read_text(encoding="utf-8")
+    assert "Learn sync vs push" not in source

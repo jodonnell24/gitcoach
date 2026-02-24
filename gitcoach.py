@@ -72,6 +72,155 @@ CONFIG_STRING_KEYS = {
     "commit_untracked_policy",
 }
 
+MASCOT_NAME = "GitCoach"
+
+# Centralized interactive copy so wording stays consistent.
+INTERACTIVE_COPY = {
+    "app_title": f"What would you like {MASCOT_NAME} to help with?",
+    "app_subtitle": f"Pick a goal first. {MASCOT_NAME} will handle the Git steps with you.",
+    "goal_prompt": "Choose a task",
+    "why_title": f"Why this helps ({MASCOT_NAME})",
+    "next_steps_title": f"Try this next in {MASCOT_NAME}",
+    "cancelled": f"[info] No problem, cancelled. {MASCOT_NAME} is here when you're ready.",
+    "doctor_cancelled": f"[info] No problem, cancelled. You can reopen Doctor anytime.",
+    "undo_cancelled": f"[info] No problem, cancelled. You can keep going safely.",
+    "profile_title": "Safety profile settings",
+    "doctor_menu_title": "Doctor options",
+    "undo_menu_title": "Undo & recovery options",
+    "more_menu_title": "More options (advanced)",
+    "ignore_menu_title": ".gitignore helper",
+    "confirm_loop_main": "Want to do another task?",
+    "confirm_loop_undo": "Want to do another undo/recovery task?",
+    "confirm_loop_doctor": "Want to do another Doctor task?",
+    "confirm_loop_advanced": "Want to do another advanced task?",
+    "confirm_apply_ignore": "Apply these patterns now?",
+    "confirm_risky_local": f"{MASCOT_NAME} tip: this changes local history/worktree. Continue?",
+    "workflow_basics_title": f"{MASCOT_NAME} workflow basics",
+    "workflow_guide_title": f"Simple workflow with {MASCOT_NAME}",
+}
+
+GOAL_START_WORK = "Start work on a new branch"
+GOAL_SAVE_CHANGES = "Save my changes (commit)"
+GOAL_SHARE_GITHUB = "Share my work to GitHub (sync + push)"
+GOAL_SYNC_ONLY = "Get latest remote updates (sync only)"
+GOAL_UNDO = "Undo or recover changes"
+GOAL_DOCTOR = "Fix identity or contribution issues"
+GOAL_STATUS = "Check repo status"
+GOAL_IGNORE = "Handle untracked files (.gitignore)"
+GOAL_SAFETY = "Adjust safety settings"
+GOAL_BASICS = "Understand workflow basics"
+GOAL_MORE = "More options (advanced)"
+GOAL_EXIT = "Exit"
+
+INTERACTIVE_MAIN_ACTIONS = [
+    GOAL_START_WORK,
+    GOAL_SAVE_CHANGES,
+    GOAL_SHARE_GITHUB,
+    GOAL_SYNC_ONLY,
+    GOAL_UNDO,
+    GOAL_DOCTOR,
+    GOAL_STATUS,
+    GOAL_IGNORE,
+    GOAL_SAFETY,
+    GOAL_BASICS,
+    GOAL_MORE,
+    GOAL_EXIT,
+]
+
+INTERACTIVE_GOAL_HELP: dict[str, list[str]] = {
+    GOAL_START_WORK: [
+        f"Use when: you're starting a feature or fix.",
+        f"Why: keeps main clean, and {MASCOT_NAME} can carry local changes if needed.",
+    ],
+    GOAL_SAVE_CHANGES: [
+        "Use when: you want a safe checkpoint in Git.",
+        f"Why: {MASCOT_NAME} helps stage, quality-check, and commit clearly.",
+    ],
+    GOAL_SHARE_GITHUB: [
+        "Use when: your local commits are ready to publish.",
+        f"Why: {MASCOT_NAME} syncs first, then pushes to reduce rejection errors.",
+    ],
+    GOAL_SYNC_ONLY: [
+        "Use when: your branch may be behind remote updates.",
+        "Why: brings remote commits into your local branch without publishing.",
+    ],
+    GOAL_UNDO: [
+        "Use when: you staged/committed/restored the wrong thing.",
+        f"Why: guided recovery options are safer than panic reset commands.",
+    ],
+    GOAL_DOCTOR: [
+        "Use when: GitHub contributions are missing or identity is wrong.",
+        f"Why: Doctor scans identity and can rewrite commit emails safely.",
+    ],
+    GOAL_STATUS: [
+        "Use when: you're not sure what state your branch is in.",
+        "Why: shows staged/unstaged/untracked plus ahead/behind in one snapshot.",
+    ],
+    GOAL_IGNORE: [
+        "Use when: random files keep showing up in status.",
+        f"Why: suggests and applies .gitignore patterns from current files.",
+    ],
+    GOAL_SAFETY: [
+        "Use when: you want stricter or faster Git behavior.",
+        f"Why: switch workflow profiles (solo-safe/fast/strict) cleanly.",
+    ],
+    GOAL_BASICS: [
+        "Use when: you're unsure what each major action does.",
+        f"Why: quick explanation of start/save/sync/push/share/undo.",
+    ],
+}
+
+DOCTOR_MENU_ACTIONS = [
+    "Scan identity issues",
+    "Scan folder for identity issues",
+    "Set git identity (name/email)",
+    "Fix email history",
+    "Promote branch to main",
+    "Back to main menu",
+]
+
+UNDO_MENU_ACTIONS = [
+    "Unstage all staged files",
+    "Discard unstaged tracked changes",
+    "Undo last commit (keep changes staged)",
+    "Undo last commit (keep changes unstaged)",
+    "Revert a commit (safe history)",
+    "Restore one file to HEAD",
+    "Back to main menu",
+]
+
+PROFILE_MENU_ACTIONS = [
+    "Show current profile",
+    "Set profile: solo-safe",
+    "Set profile: fast",
+    "Set profile: strict",
+    "Back to main menu",
+]
+
+IGNORE_MENU_ACTIONS = [
+    "Preview untracked + suggestions",
+    "Apply all suggested patterns",
+    "Pick suggested patterns to apply",
+    "Add one custom ignore pattern",
+    "Back to main menu",
+]
+
+MORE_MENU_ACTIONS = [
+    "Switch branch directly",
+    "Sync current branch (no push)",
+    "Push current branch only",
+    "Draft commit message",
+    "Ship dev -> main",
+    "Doctor tools",
+    "Undo / rollback tools",
+    "Workflow profile settings",
+    "Install safety guards",
+    "Init repo defaults",
+    "Recent actions log",
+    "Quick guide",
+    "Back to main menu",
+]
+
 
 def safe_input(prompt: str) -> str:
     try:
@@ -340,6 +489,20 @@ def current_upstream() -> str | None:
     return value
 
 
+def branch_upstream(branch: str) -> str | None:
+    result = git(
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        f"{branch}@{{upstream}}",
+        check=False,
+    )
+    value = (result.stdout or "").strip()
+    if result.returncode != 0 or not value:
+        return None
+    return value
+
+
 def status_counts() -> tuple[int, int, int]:
     staged = 0
     unstaged = 0
@@ -469,6 +632,18 @@ def checkout_branch_with_changes(branch: str, *, autostash: bool = True) -> bool
 
 def ahead_behind(upstream: str) -> tuple[int, int]:
     result = git("rev-list", "--left-right", "--count", f"{upstream}...HEAD", check=False)
+    if result.returncode != 0:
+        return (0, 0)
+    parts = result.stdout.strip().split()
+    if len(parts) != 2:
+        return (0, 0)
+    behind = int(parts[0])
+    ahead = int(parts[1])
+    return ahead, behind
+
+
+def ahead_behind_refs(local_ref: str, upstream_ref: str) -> tuple[int, int]:
+    result = git("rev-list", "--left-right", "--count", f"{upstream_ref}...{local_ref}", check=False)
     if result.returncode != 0:
         return (0, 0)
     parts = result.stdout.strip().split()
@@ -807,6 +982,122 @@ def prompt_confirm(prompt: str, *, default: bool = False) -> bool:
         if raw in {"n", "no"}:
             return False
         print("[warn] Enter y or n.")
+
+
+def interactive_fix_suggestions(error_text: str) -> list[str]:
+    text = error_text.lower()
+    suggestions: list[str] = []
+
+    if "working tree is not clean" in text:
+        suggestions.extend(
+            [
+                GOAL_SAVE_CHANGES,
+                GOAL_UNDO,
+                GOAL_START_WORK,
+            ]
+        )
+    elif "no staged tracked changes to commit" in text:
+        suggestions.extend(
+            [
+                f"Edit files first, then choose: {GOAL_SAVE_CHANGES}.",
+                f"If files are untracked, choose: {GOAL_IGNORE}.",
+            ]
+        )
+    elif "untracked files detected and policy is `block`" in text or "commit blocked: untracked files detected" in text:
+        suggestions.extend(
+            [
+                GOAL_IGNORE,
+                f"Then retry {GOAL_SAVE_CHANGES} and include untracked files if needed.",
+                f"Or choose {GOAL_SAFETY} if strict mode is too rigid.",
+            ]
+        )
+    elif "missing dev branch" in text:
+        suggestions.extend(
+            [
+                "Open More options (advanced) -> Init repo defaults.",
+                "If dev already exists, use More options (advanced) -> Switch branch directly.",
+            ]
+        )
+    elif "source branch does not exist" in text or "no local branches found" in text:
+        suggestions.extend(
+            [
+                "Use More options (advanced) -> Switch branch directly to inspect branches.",
+                "If branch setup is missing, use More options (advanced) -> Init repo defaults.",
+            ]
+        )
+    elif "no remotes configured" in text or "remote origin not found" in text:
+        suggestions.extend(
+            [
+                "This repo has no remote yet. Add one once: git remote add origin <url>",
+                f"Then retry: {GOAL_SHARE_GITHUB}.",
+            ]
+        )
+    elif "no upstream" in text or "@{upstream}" in text or "has no upstream branch" in text:
+        suggestions.extend(
+            [
+                "Use More options (advanced) -> Push current branch only to set upstream.",
+                f"Then use {GOAL_SHARE_GITHUB} for the normal flow.",
+            ]
+        )
+    elif (
+        "failed to push some refs" in text
+        or "non-fast-forward" in text
+        or "fetch first" in text
+        or "rejected" in text
+    ):
+        suggestions.extend(
+            [
+                GOAL_SHARE_GITHUB,
+                f"If it still fails, choose {GOAL_SYNC_ONLY} first, then push again.",
+            ]
+        )
+    elif "push blocked: working tree has local changes" in text or "dirty push" in text:
+        suggestions.extend(
+            [
+                GOAL_SAVE_CHANGES,
+                GOAL_UNDO,
+                f"Then retry: {GOAL_SHARE_GITHUB}.",
+            ]
+        )
+    elif "commit blocked on main" in text or "push blocked to main" in text:
+        suggestions.extend(
+            [
+                GOAL_START_WORK,
+                "If this is intentional, use More options (advanced) for branch operations first.",
+            ]
+        )
+    elif "non-fast-forward push blocked" in text:
+        suggestions.extend(
+            [
+                GOAL_SYNC_ONLY,
+                f"Then retry: {GOAL_SHARE_GITHUB}.",
+                f"If needed, review {GOAL_SAFETY} profile settings.",
+            ]
+        )
+    elif "conflict" in text or "could not apply" in text:
+        suggestions.extend(
+            [
+                "Resolve conflict files, then retry the same action.",
+                f"If you want to back out first, choose: {GOAL_UNDO}.",
+            ]
+        )
+    elif "not inside a git repository" in text:
+        suggestions.extend(
+            [
+                "Open a Git repository folder, or run git init first.",
+                "Then use More options (advanced) -> Init repo defaults.",
+            ]
+        )
+
+    if not suggestions:
+        suggestions.append(f"Run {GOAL_STATUS}, then try again.")
+    return suggestions
+
+
+def print_interactive_error(err: GitCoachError) -> None:
+    print(f"[error] {err}")
+    fixes = interactive_fix_suggestions(str(err))
+    print_box(INTERACTIVE_COPY["next_steps_title"], [f"- {item}" for item in fixes[:3]])
 
 
 def choose_option(prompt: str, options: list[str], *, allow_cancel: bool = True) -> str:
@@ -1195,7 +1486,7 @@ def command_ignore(args: argparse.Namespace) -> int:
         print("Patterns to add to .gitignore:")
         for pattern in candidate_patterns:
             print(f"  - {pattern}")
-        if not prompt_confirm("Apply these patterns?", default=True):
+        if not prompt_confirm(INTERACTIVE_COPY["confirm_apply_ignore"], default=True):
             raise UserCancelled
 
     added = apply_ignore_patterns(candidate_patterns)
@@ -2126,11 +2417,49 @@ def run_interactive_promote_main() -> None:
     )
 
 
+def maybe_sync_dev_before_feature_start(dev_branch: str) -> None:
+    if worktree_dirty():
+        print("[info] Local changes detected; skipping pre-sync and carrying changes to new branch.")
+        return
+
+    if not branch_exists(dev_branch):
+        return
+
+    upstream = branch_upstream(dev_branch)
+    if not upstream:
+        return
+
+    ahead, behind = ahead_behind_refs(dev_branch, upstream)
+    if behind <= 0:
+        return
+
+    print_box(
+        "Dev branch has remote updates",
+        [
+            f"{dev_branch} is behind {upstream} by {behind} commit(s).",
+            "Starting work from an outdated dev branch can miss recent changes.",
+        ],
+    )
+    if not prompt_confirm("Sync dev branch first?", default=True):
+        return
+
+    previous = current_branch()
+    if previous != dev_branch:
+        git("checkout", dev_branch, capture=False)
+    remote_name = upstream.split("/", 1)[0]
+    git("fetch", remote_name, capture=False)
+    git("pull", "--rebase", "--autostash", capture=False)
+    print(f"[ok] Synced {dev_branch} with {upstream}")
+    if previous != dev_branch:
+        git("checkout", previous, capture=False)
+
+
 def run_interactive_start_feature() -> None:
     ensure_git_repo()
     feature_name = prompt_text("Feature name", required=True)
     dev_branch = prompt_text("Dev branch", default="dev", required=True)
     autostash = prompt_confirm("Auto-stash if branch switch needs it?", default=True)
+    maybe_sync_dev_before_feature_start(dev_branch)
     command_start(
         argparse.Namespace(
             feature_name=feature_name,
@@ -2192,18 +2521,12 @@ def run_interactive_install_safety_guards() -> None:
 
 def run_interactive_profile_menu() -> None:
     ensure_git_repo()
-    actions = [
-        "Show current profile",
-        "Set profile: solo-safe",
-        "Set profile: fast",
-        "Set profile: strict",
-        "Back to main menu",
-    ]
+    actions = PROFILE_MENU_ACTIONS
     while True:
         config = load_gitcoach_config()
-        print_box("Workflow profile", profile_summary_lines(config))
+        print_box(INTERACTIVE_COPY["profile_title"], profile_summary_lines(config))
         try:
-            picked = choose_option("Profile actions", actions, allow_cancel=True)
+            picked = choose_option("Profile options", actions, allow_cancel=True)
         except UserCancelled:
             return
         if picked == "Back to main menu":
@@ -2212,14 +2535,14 @@ def run_interactive_profile_menu() -> None:
             continue
 
         profile_name = picked.split(":", 1)[1].strip()
-        install_guards = prompt_confirm("Reinstall safety hooks now?", default=True)
+        install_guards = prompt_confirm(f"{MASCOT_NAME} tip: reinstall safety hooks now?", default=True)
         command_profile(
             argparse.Namespace(
                 set=profile_name,
                 install_guards=install_guards,
             )
         )
-        if not prompt_confirm("Adjust profile again?", default=True):
+        if not prompt_confirm("Want to adjust profile settings again?", default=True):
             return
 
 
@@ -2241,17 +2564,11 @@ def run_interactive_ignore_helper() -> None:
         return
 
     suggestions = suggest_ignore_patterns(untracked_files)
-    actions = [
-        "Preview untracked + suggestions",
-        "Apply all suggested patterns",
-        "Pick suggested patterns to apply",
-        "Add one custom ignore pattern",
-        "Back to main menu",
-    ]
+    actions = IGNORE_MENU_ACTIONS
 
     while True:
         try:
-            picked = choose_option(".gitignore helper", actions, allow_cancel=True)
+            picked = choose_option(INTERACTIVE_COPY["ignore_menu_title"], actions, allow_cancel=True)
         except UserCancelled:
             return
         if picked == "Back to main menu":
@@ -2368,15 +2685,7 @@ def undo_restore_file_to_head() -> None:
 
 
 def command_interactive_undo_menu() -> None:
-    actions = [
-        "Unstage all staged files",
-        "Discard unstaged tracked changes",
-        "Undo last commit (keep changes staged)",
-        "Undo last commit (keep changes unstaged)",
-        "Revert a commit (safe history)",
-        "Restore one file to HEAD",
-        "Back to main menu",
-    ]
+    actions = UNDO_MENU_ACTIONS
     dispatch = {
         "Unstage all staged files": undo_unstage_all,
         "Discard unstaged tracked changes": undo_discard_unstaged,
@@ -2388,7 +2697,7 @@ def command_interactive_undo_menu() -> None:
 
     while True:
         try:
-            picked = choose_option("Undo actions", actions, allow_cancel=True)
+            picked = choose_option(INTERACTIVE_COPY["undo_menu_title"], actions, allow_cancel=True)
         except UserCancelled:
             return
 
@@ -2401,18 +2710,18 @@ def command_interactive_undo_menu() -> None:
             "Undo last commit (keep changes unstaged)",
             "Restore one file to HEAD",
         }:
-            if not prompt_confirm("This changes local history/worktree. Continue?", default=False):
+            if not prompt_confirm(INTERACTIVE_COPY["confirm_risky_local"], default=False):
                 continue
 
         action = dispatch[picked]
         try:
             action()
         except UserCancelled:
-            print("[info] Undo action cancelled.")
+            print(INTERACTIVE_COPY["undo_cancelled"])
         except GitCoachError as err:
-            print(f"[error] {err}")
+            print_interactive_error(err)
 
-        if not prompt_confirm("Run another Undo action?", default=True):
+        if not prompt_confirm(INTERACTIVE_COPY["confirm_loop_undo"], default=True):
             return
 
 
@@ -2502,11 +2811,11 @@ def run_interactive_publish_after_sync() -> None:
     branch = current_branch()
     lines = [
         "When: you want your local commits on GitHub.",
-        "Step 1 (sync): bring in remote changes first so push is less likely to fail.",
+        f"{MASCOT_NAME} tip: sync first to reduce push rejection errors.",
         "Step 2 (push): publish your local commits.",
         f"Current branch: {branch}",
     ]
-    print_box("Publish safely (sync + push)", lines)
+    print_box(f"Share with {MASCOT_NAME} (sync + push)", lines)
     if not prompt_confirm("Run sync, then push?", default=True):
         raise UserCancelled
 
@@ -2514,20 +2823,21 @@ def run_interactive_publish_after_sync() -> None:
     run_interactive_push_current_branch()
 
 
-def run_interactive_sync_vs_push_explainer() -> None:
+def run_interactive_workflow_basics() -> None:
     lines = [
-        "Sync = get remote commits into your local branch (fetch + rebase/pull).",
-        "Use sync when: you were away, changed machines, or branch may be behind.",
-        "Push = send your local commits to remote (GitHub).",
-        "Use push when: your local commits are ready to share.",
-        "Safe default when unsure: sync first, then push.",
+        f"{GOAL_START_WORK}: creates/switches to a feature branch.",
+        f"{GOAL_SAVE_CHANGES}: makes a commit checkpoint.",
+        f"{GOAL_SYNC_ONLY}: brings remote commits into your local branch.",
+        "Push changes: publishes your local commits to GitHub.",
+        f"{GOAL_SHARE_GITHUB}: runs sync first, then push.",
+        f"{GOAL_UNDO}: guided rollback options when something goes wrong.",
     ]
-    print_box("Sync vs Push", lines)
+    print_box(INTERACTIVE_COPY["workflow_basics_title"], lines)
 
 
 def run_interactive_quick_guide() -> None:
     lines = [
-        "1) Keep main stable. Start work on feature branches.",
+        f"1) Keep main stable. Use {GOAL_START_WORK}.",
         "2) Commit small, clear changes. Save often.",
         "3) Sync = pull remote updates into your local branch.",
         "4) Push = publish your local commits to GitHub.",
@@ -2536,7 +2846,7 @@ def run_interactive_quick_guide() -> None:
         "7) Use Doctor for identity checks and contribution fixes.",
         "8) Use Undo menu for safe rollbacks instead of panic commands.",
     ]
-    print_box("Simple Git workflow (solo/noob friendly)", lines)
+    print_box(INTERACTIVE_COPY["workflow_guide_title"], lines)
 
 
 def interactive_context_lines() -> list[str]:
@@ -2562,14 +2872,7 @@ def interactive_context_lines() -> list[str]:
 
 
 def command_interactive_doctor_menu() -> None:
-    actions = [
-        "Scan identity issues",
-        "Scan folder for identity issues",
-        "Set git identity (name/email)",
-        "Fix email history",
-        "Promote branch to main",
-        "Back to main menu",
-    ]
+    actions = DOCTOR_MENU_ACTIONS
     dispatch = {
         "Scan identity issues": run_interactive_doctor_scan,
         "Scan folder for identity issues": run_interactive_doctor_scan_folder,
@@ -2580,7 +2883,7 @@ def command_interactive_doctor_menu() -> None:
 
     while True:
         try:
-            picked = choose_option("Doctor actions", actions, allow_cancel=True)
+            picked = choose_option(INTERACTIVE_COPY["doctor_menu_title"], actions, allow_cancel=True)
         except UserCancelled:
             return
 
@@ -2591,30 +2894,16 @@ def command_interactive_doctor_menu() -> None:
         try:
             action()
         except UserCancelled:
-            print("[info] Doctor action cancelled.")
+            print(INTERACTIVE_COPY["doctor_cancelled"])
         except GitCoachError as err:
-            print(f"[error] {err}")
+            print_interactive_error(err)
 
-        if not prompt_confirm("Run another Doctor action?", default=True):
+        if not prompt_confirm(INTERACTIVE_COPY["confirm_loop_doctor"], default=True):
             return
 
 
 def command_interactive_more_menu() -> None:
-    actions = [
-        "Switch branch directly",
-        "Sync current branch (no push)",
-        "Push current branch only",
-        "Draft commit message",
-        "Ship dev -> main",
-        "Doctor tools",
-        "Undo / rollback tools",
-        "Workflow profile settings",
-        "Install safety guards",
-        "Init repo defaults",
-        "Recent actions log",
-        "Quick guide",
-        "Back to main menu",
-    ]
+    actions = MORE_MENU_ACTIONS
 
     dispatch = {
         "Switch branch directly": run_interactive_switch_branch,
@@ -2633,7 +2922,7 @@ def command_interactive_more_menu() -> None:
 
     while True:
         try:
-            picked = choose_option("More options", actions, allow_cancel=True)
+            picked = choose_option(INTERACTIVE_COPY["more_menu_title"], actions, allow_cancel=True)
         except UserCancelled:
             return
 
@@ -2644,129 +2933,74 @@ def command_interactive_more_menu() -> None:
         try:
             action()
         except UserCancelled:
-            print("[info] Action cancelled.")
+            print(INTERACTIVE_COPY["cancelled"])
         except GitCoachError as err:
-            print(f"[error] {err}")
+            print_interactive_error(err)
 
         if picked in {"Doctor tools", "Undo / rollback tools", "Workflow profile settings"}:
             continue
 
-        if not prompt_confirm("Run another advanced action?", default=True):
+        if not prompt_confirm(INTERACTIVE_COPY["confirm_loop_advanced"], default=True):
             return
 
 
 def goal_help_lines(goal: str) -> list[str] | None:
-    hints = {
-        "Start new work on a branch": [
-            "Use when: you're starting a feature or fix.",
-            "Why: keeps main clean and avoids branch/switch confusion.",
-        ],
-        "Save my current changes (commit)": [
-            "Use when: you want a safe checkpoint in Git.",
-            "Why: creates a commit and can guide commit message quality.",
-        ],
-        "Share my work to GitHub (sync + push)": [
-            "Use when: your local commits are ready to publish.",
-            "Why: sync first reduces push conflicts, then push uploads commits.",
-        ],
-        "Get latest remote updates (sync only)": [
-            "Use when: your branch may be behind remote.",
-            "Why: updates local branch without publishing anything.",
-        ],
-        "Undo / recover something": [
-            "Use when: you staged/committed/restored the wrong thing.",
-            "Why: guided rollback options are safer than ad-hoc reset commands.",
-        ],
-        "Fix identity / contribution issues": [
-            "Use when: GitHub contributions are missing or email is wrong.",
-            "Why: Doctor scans identity and can rewrite old commit emails.",
-        ],
-        "See repo status right now": [
-            "Use when: you are unsure what state your branch is in.",
-            "Why: shows staged/unstaged/untracked + ahead/behind in one snapshot.",
-        ],
-        "Handle untracked files (.gitignore)": [
-            "Use when: random files keep showing up in status.",
-            "Why: suggests/apply .gitignore patterns from untracked files.",
-        ],
-        "Adjust safety settings": [
-            "Use when: you want stricter or faster Git behavior.",
-            "Why: switch workflow profiles (solo-safe/fast/strict) cleanly.",
-        ],
-        "Learn sync vs push": [
-            "Use when: you're unsure if you need sync, push, or both.",
-            "Why: simple explanation with a safe default workflow.",
-        ],
-    }
-    return hints.get(goal)
+    return INTERACTIVE_GOAL_HELP.get(goal)
 
 
 def command_interactive(_args: argparse.Namespace) -> int:
     ensure_git_repo()
-    actions = [
-        "Start new work on a branch",
-        "Save my current changes (commit)",
-        "Share my work to GitHub (sync + push)",
-        "Get latest remote updates (sync only)",
-        "Undo / recover something",
-        "Fix identity / contribution issues",
-        "See repo status right now",
-        "Handle untracked files (.gitignore)",
-        "Adjust safety settings",
-        "Learn sync vs push",
-        "More options",
-        "Exit",
-    ]
+    actions = INTERACTIVE_MAIN_ACTIONS
 
     dispatch = {
-        "Start new work on a branch": run_interactive_start_feature,
-        "Save my current changes (commit)": run_interactive_save_commit,
-        "Share my work to GitHub (sync + push)": run_interactive_publish_after_sync,
-        "Get latest remote updates (sync only)": run_interactive_sync_current_branch,
-        "Undo / recover something": command_interactive_undo_menu,
-        "Fix identity / contribution issues": command_interactive_doctor_menu,
-        "See repo status right now": run_interactive_status_snapshot,
-        "Handle untracked files (.gitignore)": run_interactive_ignore_helper,
-        "Adjust safety settings": run_interactive_profile_menu,
-        "Learn sync vs push": run_interactive_sync_vs_push_explainer,
-        "More options": command_interactive_more_menu,
+        GOAL_START_WORK: run_interactive_start_feature,
+        GOAL_SAVE_CHANGES: run_interactive_save_commit,
+        GOAL_SHARE_GITHUB: run_interactive_publish_after_sync,
+        GOAL_SYNC_ONLY: run_interactive_sync_current_branch,
+        GOAL_UNDO: command_interactive_undo_menu,
+        GOAL_DOCTOR: command_interactive_doctor_menu,
+        GOAL_STATUS: run_interactive_status_snapshot,
+        GOAL_IGNORE: run_interactive_ignore_helper,
+        GOAL_SAFETY: run_interactive_profile_menu,
+        GOAL_BASICS: run_interactive_workflow_basics,
+        GOAL_MORE: command_interactive_more_menu,
     }
 
     print_box(
-        "What would you like to do?",
+        INTERACTIVE_COPY["app_title"],
         interactive_context_lines()
-        + ["", "Pick a goal first. GitCoach will handle the Git steps."],
+        + ["", INTERACTIVE_COPY["app_subtitle"]],
     )
     while True:
         try:
-            picked = choose_option("Choose your goal", actions, allow_cancel=True)
+            picked = choose_option(INTERACTIVE_COPY["goal_prompt"], actions, allow_cancel=True)
         except UserCancelled:
             return 0
 
-        if picked == "Exit":
+        if picked == GOAL_EXIT:
             return 0
 
         hint_lines = goal_help_lines(picked)
         if hint_lines:
-            print_box("Why this action", hint_lines)
+            print_box(INTERACTIVE_COPY["why_title"], hint_lines)
 
         action = dispatch[picked]
         try:
             action()
         except UserCancelled:
-            print("[info] Action cancelled.")
+            print(INTERACTIVE_COPY["cancelled"])
         except GitCoachError as err:
-            print(f"[error] {err}")
+            print_interactive_error(err)
 
         if picked in {
-            "Undo / recover something",
-            "Fix identity / contribution issues",
-            "Adjust safety settings",
-            "More options",
+            GOAL_UNDO,
+            GOAL_DOCTOR,
+            GOAL_SAFETY,
+            GOAL_MORE,
         }:
             continue
 
-        if not prompt_confirm("Do you want to do another task?", default=True):
+        if not prompt_confirm(INTERACTIVE_COPY["confirm_loop_main"], default=True):
             return 0
 
 
