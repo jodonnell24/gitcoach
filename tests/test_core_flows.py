@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import gitcoach
+import pytest
 
 
 def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -124,3 +125,84 @@ def test_doctor_all_repos_scan_mode(tmp_path: Path, capsys) -> None:
     assert rc == 0
     assert "Scanning 2 repo(s)" in captured.out
     assert "[warn] a:" in captured.out
+
+
+def test_profile_set_fast_updates_config_and_hooks(tmp_path: Path, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    gitcoach.command_init(
+        argparse.Namespace(main_branch="main", dev_branch="dev", install_guards=True)
+    )
+
+    rc = gitcoach.command_profile(
+        argparse.Namespace(set="fast", install_guards=True)
+    )
+
+    assert rc == 0
+    config_text = (repo / ".gitcoach.yml").read_text(encoding="utf-8")
+    assert "workflow_profile: fast" in config_text
+    assert "guard_commit_main: false" in config_text
+    assert "guard_push_main: false" in config_text
+
+    pre_commit_text = (repo / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    pre_push_text = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+    assert 'BLOCK_COMMIT_MAIN="0"' in pre_commit_text
+    assert 'BLOCK_PUSH_MAIN="0"' in pre_push_text
+
+
+def test_ignore_apply_adds_patterns_and_logs_action(tmp_path: Path, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    (repo / "dist").mkdir()
+    (repo / "dist" / "bundle.js").write_text("x", encoding="utf-8")
+    (repo / "dist" / "bundle.css").write_text("x", encoding="utf-8")
+
+    rc = gitcoach.command_ignore(
+        argparse.Namespace(apply=True, pattern=[], yes=True)
+    )
+
+    assert rc == 0
+    ignore_text = (repo / ".gitignore").read_text(encoding="utf-8")
+    assert "dist/" in ignore_text
+
+    actions_text = (repo / ".git" / ".gitcoach-actions.jsonl").read_text(encoding="utf-8")
+    assert '"action": "ignore.apply"' in actions_text
+
+
+def test_actions_command_outputs_recent_entries(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = init_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    gitcoach.command_profile(
+        argparse.Namespace(set="solo-safe", install_guards=False)
+    )
+
+    rc = gitcoach.command_actions(argparse.Namespace(limit=10))
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "Recent actions" in captured.out
+    assert "profile.set" in captured.out
+
+
+def test_save_respects_strict_untracked_policy(tmp_path: Path, monkeypatch) -> None:
+    repo = init_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    gitcoach.command_profile(
+        argparse.Namespace(set="strict", install_guards=False)
+    )
+    (repo / "scratch.tmp").write_text("temp\n", encoding="utf-8")
+    (repo / "app.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    with pytest.raises(gitcoach.GitCoachError):
+        gitcoach.command_save(
+            argparse.Namespace(
+                message="feat: update app",
+                include_untracked=False,
+                guided=False,
+                strict_message=False,
+            )
+        )

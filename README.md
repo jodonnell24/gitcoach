@@ -10,6 +10,7 @@ Small, opinionated Git helper for solo developers.
 
 - Keeping `dev` and `main` separated without extra ceremony
 - Avoiding accidental commits of untracked files
+- Switching between safety profiles (`solo-safe`, `fast`, `strict`) without editing hooks manually
 - Safe undo/rollback actions without scary git commands
 - Shipping safely with fast-forward merges
 - Diagnosing and fixing GitHub contributions issues caused by wrong commit email
@@ -46,22 +47,27 @@ GITCOACH_NO_GUM=1 python3 gitcoach.py
 
 Interactive menu now includes:
 
-- `Doctor` submenu (repo scan, folder scan, set identity, fix email history, promote to main)
-- `Undo / rollback` submenu (unstage, discard, undo commit, revert commit, restore file)
-- `Quick guide` (best-practice flow for noobs/vibecoders)
-- `Status snapshot`
-- `Install safety guards`
-- `Draft commit message` helper
-- `Switch branch`
-- `Sync current branch`
-- `Push current branch`
-- Existing start/save/ship/init flows
+- Goal-first prompts (`What would you like to do?`) so you can pick intent before Git terminology.
+- Plain-language paths for:
+  - start new work
+  - save changes
+  - share work safely (`sync + push`)
+  - get latest remote updates (`sync only`)
+  - undo/recover
+  - fix identity/contributions
+  - handle untracked files
+  - adjust safety settings
+- A built-in `sync vs push` explainer and a smaller `More options` menu for advanced actions.
 
 Core commands:
 
 ```bash
 python3 gitcoach.py init                  # installs safety guards by default
 python3 gitcoach.py guard                 # install/refresh safety hooks
+python3 gitcoach.py profile --set strict  # switch guard behavior preset
+python3 gitcoach.py actions               # recent destructive/safety actions
+python3 gitcoach.py ignore                # suggest .gitignore patterns
+python3 gitcoach.py ignore --apply        # apply suggested patterns
 python3 gitcoach.py start "my feature"    # carries dirty changes to new branch
 python3 gitcoach.py message               # suggest a good commit message
 python3 gitcoach.py save --guided         # commit with guided message helper
@@ -124,12 +130,29 @@ gitcoach save --guided
 gitcoach ship
 ```
 
+## Workflow Profiles
+
+Profiles are saved in `.gitcoach.yml` and control guard behavior:
+
+- `solo-safe`: main/push/force/dirty guards on, untracked commit policy = `ask`
+- `fast`: minimal guard friction
+- `strict`: all guards on, untracked commit policy = `block`
+
+Use:
+
+```bash
+python3 gitcoach.py profile
+python3 gitcoach.py profile --set solo-safe
+python3 gitcoach.py profile --set fast
+python3 gitcoach.py profile --set strict
+```
+
 ## Safety Guards
 
 `gitcoach guard` installs:
 
 - `pre-commit`: blocks commits directly on `main`/`master` unless explicitly bypassed
-- `pre-push`: blocks pushes to `main`/`master` and blocks non-fast-forward pushes by default
+- `pre-push`: blocks pushes to `main`/`master`, dirty-tree pushes, and non-fast-forward pushes (profile-controlled)
 
 Bypass env vars (one-off, advanced users):
 
@@ -137,6 +160,8 @@ Bypass env vars (one-off, advanced users):
 GITCOACH_ALLOW_MAIN_COMMIT=1 git commit -m "..."
 GITCOACH_ALLOW_MAIN_PUSH=1 git push origin main
 GITCOACH_ALLOW_FORCE_PUSH=1 git push --force-with-lease
+GITCOACH_ALLOW_DIRTY_PUSH=1 git push
+GITCOACH_ALLOW_UNTRACKED_COMMIT=1 git commit -m "..."
 ```
 
 If you already have custom hooks and want to overwrite them:
@@ -149,6 +174,39 @@ Noob-friendly behavior when guards are enabled:
 
 - If `save` is blocked on `main`, `gitcoach` offers to auto-create a feature branch and retries commit there.
 - `start` works even with dirty changes; it carries your work into the feature branch automatically.
+
+## .gitignore Helper
+
+Inspect untracked files and get suggested ignore patterns:
+
+```bash
+python3 gitcoach.py ignore
+```
+
+Apply all suggestions:
+
+```bash
+python3 gitcoach.py ignore --apply
+```
+
+Apply explicit patterns:
+
+```bash
+python3 gitcoach.py ignore --apply --pattern dist/ --pattern '*.log'
+```
+
+## Recent Actions Log
+
+GitCoach records safety-critical actions (history rewrite, promote-main, undo resets, profile/guard changes, ignore apply) in:
+
+`<repo>/.git/.gitcoach-actions.jsonl`
+
+View recent entries:
+
+```bash
+python3 gitcoach.py actions
+python3 gitcoach.py actions --limit 50
+```
 
 ## Contribution Email Fix
 

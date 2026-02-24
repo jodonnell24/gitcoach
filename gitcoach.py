@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shlex
@@ -22,6 +23,54 @@ class GitCoachError(Exception):
 
 class UserCancelled(Exception):
     """Raised when a user cancels an interactive prompt."""
+
+
+PROFILE_PRESETS: dict[str, dict[str, bool | str]] = {
+    "solo-safe": {
+        "guard_commit_main": True,
+        "guard_push_main": True,
+        "guard_force_push": True,
+        "guard_push_dirty": True,
+        "commit_untracked_policy": "ask",
+    },
+    "fast": {
+        "guard_commit_main": False,
+        "guard_push_main": False,
+        "guard_force_push": False,
+        "guard_push_dirty": False,
+        "commit_untracked_policy": "allow",
+    },
+    "strict": {
+        "guard_commit_main": True,
+        "guard_push_main": True,
+        "guard_force_push": True,
+        "guard_push_dirty": True,
+        "commit_untracked_policy": "block",
+    },
+}
+
+CONFIG_DEFAULTS: dict[str, bool | str] = {
+    "main_branch": "main",
+    "dev_branch": "dev",
+    "save_tracked_only": True,
+    "workflow_profile": "solo-safe",
+    **PROFILE_PRESETS["solo-safe"],
+}
+
+CONFIG_BOOL_KEYS = {
+    "save_tracked_only",
+    "guard_commit_main",
+    "guard_push_main",
+    "guard_force_push",
+    "guard_push_dirty",
+}
+
+CONFIG_STRING_KEYS = {
+    "main_branch",
+    "dev_branch",
+    "workflow_profile",
+    "commit_untracked_policy",
+}
 
 
 def safe_input(prompt: str) -> str:
@@ -436,7 +485,175 @@ def ensure_clean_worktree() -> None:
         raise GitCoachError("Working tree is not clean. Commit/stash changes first.")
 
 
+def parse_config_bool(raw: str, default: bool) -> bool:
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def normalize_commit_untracked_policy(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered in {"allow", "off", "false", "no"}:
+        return "allow"
+    if lowered in {"block", "deny", "strict", "true", "on"}:
+        return "block"
+    return "ask"
+
+
+def repo_file_path(name: str) -> Path:
+    top = run(["git", "rev-parse", "--show-toplevel"], check=False)
+    root = (top.stdout or "").strip()
+    if top.returncode == 0 and root:
+        return Path(root) / name
+    return Path(name)
+
+
+def load_gitcoach_config() -> dict[str, bool | str]:
+    path = repo_file_path(".gitcoach.yml")
+    parsed: dict[str, str] = {}
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            parsed[key.strip()] = value.strip().strip("'").strip('"')
+
+    profile = str(parsed.get("workflow_profile", CONFIG_DEFAULTS["workflow_profile"])).strip().lower()
+    if profile not in PROFILE_PRESETS:
+        profile = str(CONFIG_DEFAULTS["workflow_profile"])
+
+    config: dict[str, bool | str] = dict(CONFIG_DEFAULTS)
+    config.update(PROFILE_PRESETS[profile])
+    config["workflow_profile"] = profile
+
+    for key in CONFIG_STRING_KEYS:
+        if key in parsed and parsed[key]:
+            config[key] = parsed[key]
+    for key in CONFIG_BOOL_KEYS:
+        if key in parsed:
+            config[key] = parse_config_bool(parsed[key], bool(config[key]))
+
+    policy_raw = str(parsed.get("commit_untracked_policy", config["commit_untracked_policy"]))
+    config["commit_untracked_policy"] = normalize_commit_untracked_policy(policy_raw)
+    return config
+
+
+def save_gitcoach_config(config: dict[str, bool | str]) -> None:
+    normalized = dict(CONFIG_DEFAULTS)
+    profile = str(config.get("workflow_profile", normalized["workflow_profile"])).strip().lower()
+    if profile not in PROFILE_PRESETS:
+        profile = str(CONFIG_DEFAULTS["workflow_profile"])
+    normalized.update(PROFILE_PRESETS[profile])
+    normalized["workflow_profile"] = profile
+
+    for key in CONFIG_STRING_KEYS:
+        value = config.get(key)
+        if value not in {None, ""}:
+            normalized[key] = str(value)
+    for key in CONFIG_BOOL_KEYS:
+        value = config.get(key)
+        if isinstance(value, bool):
+            normalized[key] = value
+        elif isinstance(value, str):
+            normalized[key] = parse_config_bool(value, bool(normalized[key]))
+
+    normalized["commit_untracked_policy"] = normalize_commit_untracked_policy(
+        str(config.get("commit_untracked_policy", normalized["commit_untracked_policy"]))
+    )
+
+    lines = [
+        f"main_branch: {normalized['main_branch']}",
+        f"dev_branch: {normalized['dev_branch']}",
+        f"save_tracked_only: {str(normalized['save_tracked_only']).lower()}",
+        f"workflow_profile: {normalized['workflow_profile']}",
+        f"guard_commit_main: {str(normalized['guard_commit_main']).lower()}",
+        f"guard_push_main: {str(normalized['guard_push_main']).lower()}",
+        f"guard_force_push: {str(normalized['guard_force_push']).lower()}",
+        f"guard_push_dirty: {str(normalized['guard_push_dirty']).lower()}",
+        f"commit_untracked_policy: {normalized['commit_untracked_policy']}",
+    ]
+    repo_file_path(".gitcoach.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def apply_profile(profile: str) -> dict[str, bool | str]:
+    profile_name = profile.strip().lower()
+    if profile_name not in PROFILE_PRESETS:
+        supported = ", ".join(sorted(PROFILE_PRESETS))
+        raise GitCoachError(f"Unknown profile: {profile}. Choose one of: {supported}")
+
+    config = load_gitcoach_config()
+    config["workflow_profile"] = profile_name
+    config.update(PROFILE_PRESETS[profile_name])
+    save_gitcoach_config(config)
+    return config
+
+
+def git_dir_path() -> Path:
+    return Path(git("rev-parse", "--git-dir").stdout.strip())
+
+
+def actions_log_path() -> Path:
+    return git_dir_path() / ".gitcoach-actions.jsonl"
+
+
+def log_action(action: str, details: dict[str, object] | None = None) -> None:
+    try:
+        entry: dict[str, object] = {
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "action": action,
+            "branch": (git("rev-parse", "--abbrev-ref", "HEAD", check=False).stdout or "").strip() or "(unknown)",
+        }
+        if details:
+            clean_details: dict[str, object] = {}
+            for key, value in details.items():
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    clean_details[key] = value
+                elif isinstance(value, (list, tuple, set)):
+                    clean_details[key] = list(value)
+                else:
+                    clean_details[key] = str(value)
+            entry["details"] = clean_details
+
+        path = actions_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except Exception:
+        # Logging should never block the main action.
+        return
+
+
+def read_recent_actions(limit: int = 20) -> list[dict[str, object]]:
+    path = actions_log_path()
+    if not path.exists():
+        return []
+
+    entries: list[dict[str, object]] = []
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+    return entries[-limit:]
+
+
 def install_safety_hooks(*, force: bool = False) -> tuple[list[str], list[str]]:
+    config = load_gitcoach_config()
+    block_commit_main = bool(config["guard_commit_main"])
+    block_push_main = bool(config["guard_push_main"])
+    block_force_push = bool(config["guard_force_push"])
+    block_push_dirty = bool(config["guard_push_dirty"])
+    block_commit_untracked = str(config["commit_untracked_policy"]) == "block"
+
     hook_dir = Path(git("rev-parse", "--git-path", "hooks").stdout.strip())
     hook_dir.mkdir(parents=True, exist_ok=True)
 
@@ -444,31 +661,62 @@ def install_safety_hooks(*, force: bool = False) -> tuple[list[str], list[str]]:
     pre_push = hook_dir / "pre-push"
     marker = "gitcoach guard hook"
 
-    pre_commit_body = """#!/bin/sh
+    pre_commit_body = f"""#!/bin/sh
 # gitcoach guard hook
+BLOCK_COMMIT_MAIN="{1 if block_commit_main else 0}"
+BLOCK_COMMIT_UNTRACKED="{1 if block_commit_untracked else 0}"
+
 branch="$(git rev-parse --abbrev-ref HEAD)"
-if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-  if [ -z "${GITCOACH_ALLOW_MAIN_COMMIT:-}" ]; then
-    echo "[gitcoach] Commit blocked on $branch."
-    echo "[gitcoach] Use a feature branch, or bypass once with GITCOACH_ALLOW_MAIN_COMMIT=1."
-    exit 1
+if [ "$BLOCK_COMMIT_MAIN" = "1" ]; then
+  if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+    if [ -z "${{GITCOACH_ALLOW_MAIN_COMMIT:-}}" ]; then
+      echo "[gitcoach] Commit blocked on $branch."
+      echo "[gitcoach] Use a feature branch, or bypass once with GITCOACH_ALLOW_MAIN_COMMIT=1."
+      exit 1
+    fi
+  fi
+fi
+
+if [ "$BLOCK_COMMIT_UNTRACKED" = "1" ]; then
+  if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    if [ -z "${{GITCOACH_ALLOW_UNTRACKED_COMMIT:-}}" ]; then
+      echo "[gitcoach] Commit blocked: untracked files detected."
+      echo "[gitcoach] Add/ignore those files, or bypass once with GITCOACH_ALLOW_UNTRACKED_COMMIT=1."
+      exit 1
+    fi
   fi
 fi
 exit 0
 """
 
-    pre_push_body = """#!/bin/sh
+    pre_push_body = f"""#!/bin/sh
 # gitcoach guard hook
+BLOCK_PUSH_MAIN="{1 if block_push_main else 0}"
+BLOCK_FORCE_PUSH="{1 if block_force_push else 0}"
+BLOCK_PUSH_DIRTY="{1 if block_push_dirty else 0}"
 zero="0000000000000000000000000000000000000000"
+
+if [ "$BLOCK_PUSH_DIRTY" = "1" ]; then
+  if [ -n "$(git status --porcelain)" ]; then
+    if [ -z "${{GITCOACH_ALLOW_DIRTY_PUSH:-}}" ]; then
+      echo "[gitcoach] Push blocked: working tree has local changes."
+      echo "[gitcoach] Commit/stash first, or bypass once with GITCOACH_ALLOW_DIRTY_PUSH=1."
+      exit 1
+    fi
+  fi
+fi
+
 while read local_ref local_sha remote_ref remote_sha
 do
   case "$remote_ref" in
     refs/heads/main|refs/heads/master)
-      if [ -z "${GITCOACH_ALLOW_MAIN_PUSH:-}" ]; then
-        echo "[gitcoach] Push blocked to ${remote_ref#refs/heads/}."
-        echo "[gitcoach] Push from dev/feature branches and merge intentionally."
-        echo "[gitcoach] Bypass once with GITCOACH_ALLOW_MAIN_PUSH=1."
-        exit 1
+      if [ "$BLOCK_PUSH_MAIN" = "1" ]; then
+        if [ -z "${{GITCOACH_ALLOW_MAIN_PUSH:-}}" ]; then
+          echo "[gitcoach] Push blocked to ${{remote_ref#refs/heads/}}."
+          echo "[gitcoach] Push from dev/feature branches and merge intentionally."
+          echo "[gitcoach] Bypass once with GITCOACH_ALLOW_MAIN_PUSH=1."
+          exit 1
+        fi
       fi
       ;;
   esac
@@ -481,10 +729,12 @@ do
   fi
 
   if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
-    if [ -z "${GITCOACH_ALLOW_FORCE_PUSH:-}" ]; then
-      echo "[gitcoach] Non-fast-forward push blocked on ${remote_ref#refs/heads/}."
-      echo "[gitcoach] Bypass once with GITCOACH_ALLOW_FORCE_PUSH=1."
-      exit 1
+    if [ "$BLOCK_FORCE_PUSH" = "1" ]; then
+      if [ -z "${{GITCOACH_ALLOW_FORCE_PUSH:-}}" ]; then
+        echo "[gitcoach] Non-fast-forward push blocked on ${{remote_ref#refs/heads/}}."
+        echo "[gitcoach] Bypass once with GITCOACH_ALLOW_FORCE_PUSH=1."
+        exit 1
+      fi
     fi
   fi
 done
@@ -515,15 +765,13 @@ def slugify_feature_name(value: str) -> str:
 
 
 def write_default_config(main_branch: str, dev_branch: str) -> None:
-    path = Path(".gitcoach.yml")
+    path = repo_file_path(".gitcoach.yml")
     if path.exists():
         return
-    content = (
-        f"main_branch: {main_branch}\n"
-        f"dev_branch: {dev_branch}\n"
-        "save_tracked_only: true\n"
-    )
-    path.write_text(content, encoding="utf-8")
+    config = dict(CONFIG_DEFAULTS)
+    config["main_branch"] = main_branch
+    config["dev_branch"] = dev_branch
+    save_gitcoach_config(config)
 
 
 def pick_main_branch(preferred: str) -> str:
@@ -662,7 +910,12 @@ def command_init(args: argparse.Namespace) -> int:
     dev_branch = args.dev_branch
 
     write_default_config(main_branch, dev_branch)
+    config = load_gitcoach_config()
+    config["main_branch"] = main_branch
+    config["dev_branch"] = dev_branch
+    save_gitcoach_config(config)
     print(f"[ok] Wrote .gitcoach.yml (main={main_branch}, dev={dev_branch})")
+    print(f"[ok] Workflow profile: {config['workflow_profile']}")
 
     user_name = get_config("user.name")
     user_email = get_config("user.email")
@@ -688,12 +941,32 @@ def command_init(args: argparse.Namespace) -> int:
         if skipped:
             print(f"[warn] Skipped existing non-gitcoach hooks: {', '.join(skipped)}")
             print("       Re-run with: gitcoach guard --force")
+        log_action(
+            "guard.install",
+            {
+                "force": False,
+                "installed": installed,
+                "skipped": skipped,
+                "profile": config["workflow_profile"],
+            },
+        )
+
+    log_action(
+        "repo.init",
+        {
+            "main_branch": main_branch,
+            "dev_branch": dev_branch,
+            "install_guards": args.install_guards,
+            "profile": config["workflow_profile"],
+        },
+    )
 
     return 0
 
 
 def command_guard(args: argparse.Namespace) -> int:
     ensure_git_repo()
+    config = load_gitcoach_config()
     installed, skipped = install_safety_hooks(force=args.force)
     if installed:
         print(f"[ok] Installed/updated safety hooks: {', '.join(installed)}")
@@ -702,6 +975,245 @@ def command_guard(args: argparse.Namespace) -> int:
         print("       Re-run with --force to overwrite them.")
     if not installed and not skipped:
         print("[info] No hook changes made.")
+    print(f"[info] Active profile: {config['workflow_profile']}")
+    log_action(
+        "guard.install",
+        {
+            "force": args.force,
+            "installed": installed,
+            "skipped": skipped,
+            "profile": config["workflow_profile"],
+        },
+    )
+    return 0
+
+
+def profile_summary_lines(config: dict[str, bool | str]) -> list[str]:
+    return [
+        f"profile: {config['workflow_profile']}",
+        f"guard commit on main: {'on' if config['guard_commit_main'] else 'off'}",
+        f"guard push to main: {'on' if config['guard_push_main'] else 'off'}",
+        f"guard force push: {'on' if config['guard_force_push'] else 'off'}",
+        f"guard dirty push: {'on' if config['guard_push_dirty'] else 'off'}",
+        f"commit untracked policy: {config['commit_untracked_policy']}",
+    ]
+
+
+def command_profile(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+
+    if args.set:
+        config = apply_profile(args.set)
+        print(f"[ok] Set workflow profile: {config['workflow_profile']}")
+        print_box("Profile settings", profile_summary_lines(config))
+        if args.install_guards:
+            installed, skipped = install_safety_hooks(force=False)
+            if installed:
+                print(f"[ok] Installed/updated safety hooks: {', '.join(installed)}")
+            if skipped:
+                print(f"[warn] Existing non-gitcoach hooks preserved: {', '.join(skipped)}")
+                print("       Re-run `gitcoach guard --force` if you want to replace them.")
+        log_action(
+            "profile.set",
+            {
+                "profile": config["workflow_profile"],
+                "install_guards": args.install_guards,
+            },
+        )
+        return 0
+
+    config = load_gitcoach_config()
+    print_box("Workflow profile", profile_summary_lines(config))
+    return 0
+
+
+def format_action_details(details: object) -> str:
+    if not isinstance(details, dict):
+        return ""
+    pieces: list[str] = []
+    for key in sorted(details):
+        value = details[key]
+        if isinstance(value, list):
+            rendered = ",".join(str(item) for item in value)
+        else:
+            rendered = str(value)
+        if len(rendered) > 80:
+            rendered = rendered[:77] + "..."
+        pieces.append(f"{key}={rendered}")
+    return "; ".join(pieces)
+
+
+def command_actions(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    limit = max(1, args.limit)
+    entries = read_recent_actions(limit=limit)
+    if not entries:
+        print("[info] No gitcoach actions logged yet.")
+        return 0
+
+    print(f"Recent actions (latest {len(entries)}):")
+    for entry in reversed(entries):
+        timestamp = str(entry.get("timestamp", "?"))
+        action = str(entry.get("action", "unknown"))
+        branch = str(entry.get("branch", "?"))
+        details = format_action_details(entry.get("details"))
+        line = f"- {timestamp} | {action} | branch={branch}"
+        if details:
+            line += f" | {details}"
+        print(line)
+    return 0
+
+
+def list_untracked_files() -> list[str]:
+    result = git("ls-files", "--others", "--exclude-standard", check=False)
+    return sorted([line.strip() for line in (result.stdout or "").splitlines() if line.strip()])
+
+
+def suggest_ignore_patterns(untracked_files: list[str]) -> list[str]:
+    if not untracked_files:
+        return []
+
+    safe_top_dirs = {
+        "dist",
+        "build",
+        "coverage",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".venv",
+        "venv",
+        ".idea",
+        ".vscode",
+        ".DS_Store",
+    }
+    safe_exts = {".log", ".tmp", ".cache", ".bak", ".swp", ".pid", ".out", ".pyc"}
+    keep_dirs = {"src", "app", "lib", "docs", "test", "tests"}
+
+    top_counts: dict[str, int] = {}
+    ext_counts: dict[str, int] = {}
+    suggestions: list[str] = []
+    seen: set[str] = set()
+
+    def add(pattern: str) -> None:
+        value = pattern.strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        suggestions.append(value)
+
+    for path in untracked_files:
+        parts = path.split("/")
+        top = parts[0]
+        top_counts[top] = top_counts.get(top, 0) + 1
+        base = parts[-1]
+
+        if base == ".DS_Store":
+            add(".DS_Store")
+        if base.startswith(".env"):
+            add(".env*")
+
+        suffix = Path(base).suffix.lower()
+        if suffix:
+            ext_counts[suffix] = ext_counts.get(suffix, 0) + 1
+
+    for top, count in sorted(top_counts.items(), key=lambda item: (-item[1], item[0])):
+        if top in safe_top_dirs:
+            add(f"{top}/")
+            continue
+        if count >= 8 and top not in keep_dirs:
+            add(f"{top}/")
+
+    for suffix, count in sorted(ext_counts.items(), key=lambda item: (-item[1], item[0])):
+        if suffix in safe_exts and count >= 2:
+            add(f"*{suffix}")
+
+    return suggestions
+
+
+def apply_ignore_patterns(patterns: list[str]) -> list[str]:
+    path = repo_file_path(".gitignore")
+    current = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+    existing = {
+        line.strip()
+        for line in current.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+    additions: list[str] = []
+    for raw in patterns:
+        pattern = raw.strip()
+        if not pattern or pattern in existing or pattern in additions:
+            continue
+        additions.append(pattern)
+
+    if not additions:
+        return []
+
+    with path.open("a", encoding="utf-8") as handle:
+        if current and not current.endswith("\n"):
+            handle.write("\n")
+        for pattern in additions:
+            handle.write(pattern + "\n")
+    return additions
+
+
+def command_ignore(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    untracked_files = list_untracked_files()
+    if not untracked_files:
+        print("[ok] No untracked files found.")
+        return 0
+
+    suggestions = suggest_ignore_patterns(untracked_files)
+    preview = [f"untracked files: {len(untracked_files)}"] + [f"- {item}" for item in untracked_files[:10]]
+    if len(untracked_files) > 10:
+        preview.append(f"... {len(untracked_files) - 10} more")
+    print_box("Untracked snapshot", preview)
+
+    candidate_patterns = [pattern.strip() for pattern in (args.pattern or []) if pattern.strip()]
+    if not candidate_patterns:
+        candidate_patterns = suggestions
+
+    if not args.apply:
+        if suggestions:
+            print("Suggested .gitignore patterns:")
+            for pattern in suggestions:
+                print(f"  - {pattern}")
+            print("\nApply all suggestions:")
+            print("  gitcoach ignore --apply")
+            print("Apply specific pattern(s):")
+            print("  gitcoach ignore --apply --pattern dist/ --pattern '*.log'")
+        else:
+            print("[info] No obvious ignore suggestions yet. Pass custom patterns with --pattern.")
+        return 0
+
+    if not candidate_patterns:
+        raise GitCoachError("No patterns to apply. Pass --pattern or run without --apply to inspect suggestions.")
+
+    if not args.yes:
+        print("Patterns to add to .gitignore:")
+        for pattern in candidate_patterns:
+            print(f"  - {pattern}")
+        if not prompt_confirm("Apply these patterns?", default=True):
+            raise UserCancelled
+
+    added = apply_ignore_patterns(candidate_patterns)
+    if added:
+        print("[ok] Added patterns to .gitignore:")
+        for pattern in added:
+            print(f"  - {pattern}")
+    else:
+        print("[info] No changes made; patterns were already present.")
+
+    log_action(
+        "ignore.apply",
+        {
+            "requested": candidate_patterns,
+            "added": added,
+            "untracked_count": len(untracked_files),
+        },
+    )
     return 0
 
 
@@ -725,6 +1237,15 @@ def command_start(args: argparse.Namespace) -> int:
             print(f"[ok] Switched to existing branch: {feature_branch}")
         if used_stash:
             print("[ok] Used temporary stash to preserve changes during switch.")
+        log_action(
+            "start.feature_branch",
+            {
+                "feature_branch": feature_branch,
+                "dev_branch": dev_branch,
+                "dirty_switch": True,
+                "used_stash": used_stash,
+            },
+        )
         return 0
 
     if not branch_exists(dev_branch):
@@ -737,12 +1258,19 @@ def command_start(args: argparse.Namespace) -> int:
     else:
         git("checkout", "-b", feature_branch, capture=False)
         print(f"[ok] Created and switched to: {feature_branch}")
+    log_action(
+        "start.feature_branch",
+        {
+            "feature_branch": feature_branch,
+            "dev_branch": dev_branch,
+            "dirty_switch": False,
+        },
+    )
     return 0
 
 
 def print_untracked_preview() -> None:
-    result = git("ls-files", "--others", "--exclude-standard", check=False)
-    entries = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    entries = list_untracked_files()
     if not entries:
         return
     print("[warn] Untracked files were not staged:")
@@ -751,6 +1279,37 @@ def print_untracked_preview() -> None:
     if len(entries) > 15:
         print(f"       ... {len(entries) - 15} more")
     print("       Use --include-untracked to stage everything.")
+
+
+def enforce_untracked_commit_policy(*, include_untracked: bool) -> None:
+    if include_untracked:
+        return
+
+    untracked_entries = list_untracked_files()
+    if not untracked_entries:
+        return
+
+    config = load_gitcoach_config()
+    policy = str(config["commit_untracked_policy"])
+    print_untracked_preview()
+
+    if policy == "allow":
+        return
+    if policy == "block":
+        raise GitCoachError(
+            "Untracked files detected and policy is `block`. "
+            "Ignore them, or re-run with --include-untracked."
+        )
+
+    if not is_interactive_tty():
+        return
+
+    if prompt_confirm("Continue with tracked files only?", default=True):
+        return
+    if prompt_confirm("Stage untracked files too and include them?", default=False):
+        git("add", "-A", capture=False)
+        return
+    raise UserCancelled
 
 
 def staged_files() -> list[str]:
@@ -979,6 +1538,14 @@ def handle_main_commit_block(
     checkout_branch_with_changes(suggested, autostash=True)
     write_commit_with_message(message)
     print(f"[ok] Commit created on {suggested}")
+    log_action(
+        "save.auto_branch_commit",
+        {
+            "from_branch": branch,
+            "to_branch": suggested,
+            "subject": message.splitlines()[0].strip() if message.strip() else "",
+        },
+    )
     return True
 
 
@@ -989,7 +1556,7 @@ def command_save(args: argparse.Namespace) -> int:
         git("add", "-A", capture=False)
     else:
         git("add", "-u", capture=False)
-        print_untracked_preview()
+    enforce_untracked_commit_policy(include_untracked=args.include_untracked)
 
     files = staged_files()
     if not files:
@@ -1017,6 +1584,14 @@ def command_save(args: argparse.Namespace) -> int:
             return 0
         raise
     print("[ok] Commit created")
+    log_action(
+        "save.commit",
+        {
+            "subject": message.splitlines()[0].strip() if message.strip() else "",
+            "guided": args.guided,
+            "include_untracked": args.include_untracked,
+        },
+    )
     return 0
 
 
@@ -1043,6 +1618,14 @@ def command_ship(args: argparse.Namespace) -> int:
     if args.push:
         git("push", "origin", main_branch, capture=False)
         print(f"[ok] Pushed origin/{main_branch}")
+    log_action(
+        "ship.dev_to_main",
+        {
+            "dev_branch": dev_branch,
+            "main_branch": main_branch,
+            "push": args.push,
+        },
+    )
     return 0
 
 
@@ -1607,6 +2190,94 @@ def run_interactive_install_safety_guards() -> None:
     command_guard(argparse.Namespace(force=force))
 
 
+def run_interactive_profile_menu() -> None:
+    ensure_git_repo()
+    actions = [
+        "Show current profile",
+        "Set profile: solo-safe",
+        "Set profile: fast",
+        "Set profile: strict",
+        "Back to main menu",
+    ]
+    while True:
+        config = load_gitcoach_config()
+        print_box("Workflow profile", profile_summary_lines(config))
+        try:
+            picked = choose_option("Profile actions", actions, allow_cancel=True)
+        except UserCancelled:
+            return
+        if picked == "Back to main menu":
+            return
+        if picked == "Show current profile":
+            continue
+
+        profile_name = picked.split(":", 1)[1].strip()
+        install_guards = prompt_confirm("Reinstall safety hooks now?", default=True)
+        command_profile(
+            argparse.Namespace(
+                set=profile_name,
+                install_guards=install_guards,
+            )
+        )
+        if not prompt_confirm("Adjust profile again?", default=True):
+            return
+
+
+def run_interactive_actions_log() -> None:
+    ensure_git_repo()
+    limit_text = prompt_text("How many recent actions", default="20", required=True)
+    try:
+        limit = int(limit_text)
+    except ValueError as err:
+        raise GitCoachError("Limit must be an integer.") from err
+    command_actions(argparse.Namespace(limit=max(1, limit)))
+
+
+def run_interactive_ignore_helper() -> None:
+    ensure_git_repo()
+    untracked_files = list_untracked_files()
+    if not untracked_files:
+        print("[ok] No untracked files found.")
+        return
+
+    suggestions = suggest_ignore_patterns(untracked_files)
+    actions = [
+        "Preview untracked + suggestions",
+        "Apply all suggested patterns",
+        "Pick suggested patterns to apply",
+        "Add one custom ignore pattern",
+        "Back to main menu",
+    ]
+
+    while True:
+        try:
+            picked = choose_option(".gitignore helper", actions, allow_cancel=True)
+        except UserCancelled:
+            return
+        if picked == "Back to main menu":
+            return
+        if picked == "Preview untracked + suggestions":
+            command_ignore(argparse.Namespace(apply=False, pattern=[], yes=False))
+            continue
+        if picked == "Apply all suggested patterns":
+            command_ignore(argparse.Namespace(apply=True, pattern=[], yes=False))
+            return
+        if picked == "Pick suggested patterns to apply":
+            if not suggestions:
+                print("[info] No suggested patterns available right now.")
+                continue
+            selected = choose_multiple_options("Pick ignore pattern(s)", suggestions)
+            if not selected:
+                print("[info] No patterns selected.")
+                continue
+            command_ignore(argparse.Namespace(apply=True, pattern=selected, yes=False))
+            return
+        if picked == "Add one custom ignore pattern":
+            custom = prompt_text("Pattern to add (example: dist/ or *.log)", required=True).strip()
+            command_ignore(argparse.Namespace(apply=True, pattern=[custom], yes=False))
+            return
+
+
 def undo_unstage_all() -> None:
     if not has_staged_changes():
         print("[info] No staged changes to unstage.")
@@ -1628,6 +2299,12 @@ def undo_discard_unstaged() -> None:
         print(f"[ok] Discarded unstaged changes (safety stash: {stash_ref})")
     else:
         print("[ok] Discarded unstaged changes.")
+    log_action(
+        "undo.discard_unstaged",
+        {
+            "stash_ref": stash_ref,
+        },
+    )
 
 
 def undo_last_commit(*, keep_staged: bool) -> None:
@@ -1641,6 +2318,13 @@ def undo_last_commit(*, keep_staged: bool) -> None:
     else:
         git("reset", "HEAD~1", capture=False)
         print(f"[ok] Undid last commit and left changes unstaged. Backup: {backup}")
+    log_action(
+        "undo.last_commit",
+        {
+            "keep_staged": keep_staged,
+            "backup_branch": backup,
+        },
+    )
 
 
 def undo_revert_commit() -> None:
@@ -1657,6 +2341,7 @@ def undo_revert_commit() -> None:
     sha = lookup[picked]
     git("revert", "--no-edit", sha, capture=False)
     print(f"[ok] Reverted commit {sha}.")
+    log_action("undo.revert_commit", {"sha": sha})
 
 
 def undo_restore_file_to_head() -> None:
@@ -1673,6 +2358,13 @@ def undo_restore_file_to_head() -> None:
         print(f"[ok] Restored {file_path} to HEAD (safety stash: {stash_ref})")
     else:
         print(f"[ok] Restored {file_path} to HEAD.")
+    log_action(
+        "undo.restore_file",
+        {
+            "file": file_path,
+            "stash_ref": stash_ref,
+        },
+    )
 
 
 def command_interactive_undo_menu() -> None:
@@ -1805,14 +2497,44 @@ def run_interactive_push_current_branch() -> None:
     print(f"[ok] Pushed {branch} to {remote}/{branch} and set upstream")
 
 
+def run_interactive_publish_after_sync() -> None:
+    ensure_git_repo()
+    branch = current_branch()
+    lines = [
+        "When: you want your local commits on GitHub.",
+        "Step 1 (sync): bring in remote changes first so push is less likely to fail.",
+        "Step 2 (push): publish your local commits.",
+        f"Current branch: {branch}",
+    ]
+    print_box("Publish safely (sync + push)", lines)
+    if not prompt_confirm("Run sync, then push?", default=True):
+        raise UserCancelled
+
+    run_interactive_sync_current_branch()
+    run_interactive_push_current_branch()
+
+
+def run_interactive_sync_vs_push_explainer() -> None:
+    lines = [
+        "Sync = get remote commits into your local branch (fetch + rebase/pull).",
+        "Use sync when: you were away, changed machines, or branch may be behind.",
+        "Push = send your local commits to remote (GitHub).",
+        "Use push when: your local commits are ready to share.",
+        "Safe default when unsure: sync first, then push.",
+    ]
+    print_box("Sync vs Push", lines)
+
+
 def run_interactive_quick_guide() -> None:
     lines = [
         "1) Keep main stable. Start work on feature branches.",
-        "2) Commit small, clear changes. Push often.",
-        "3) Sync before shipping: fetch + rebase/pull.",
-        "4) Merge feature/dev back into main intentionally.",
-        "5) Use Doctor for identity checks and contribution fixes.",
-        "6) Use Undo menu for safe rollbacks instead of panic commands.",
+        "2) Commit small, clear changes. Save often.",
+        "3) Sync = pull remote updates into your local branch.",
+        "4) Push = publish your local commits to GitHub.",
+        "5) Safe default: sync first, then push.",
+        "6) Merge feature/dev back into main intentionally.",
+        "7) Use Doctor for identity checks and contribution fixes.",
+        "8) Use Undo menu for safe rollbacks instead of panic commands.",
     ]
     print_box("Simple Git workflow (solo/noob friendly)", lines)
 
@@ -1820,12 +2542,20 @@ def run_interactive_quick_guide() -> None:
 def interactive_context_lines() -> list[str]:
     repo_root = git("rev-parse", "--show-toplevel").stdout.strip()
     branch = current_branch()
+    profile = str(load_gitcoach_config()["workflow_profile"])
+    upstream = current_upstream()
+    remote_state = "no upstream"
+    if upstream:
+        ahead, behind = ahead_behind(upstream)
+        remote_state = f"{upstream} (ahead {ahead}, behind {behind})"
     status_lines = git("status", "--porcelain").stdout.splitlines()
     dirty = "dirty" if status_lines else "clean"
     menu_backend = "gum filter" if can_use_gum() else "built-in"
     return [
         f"Repo:   {repo_root}",
         f"Branch: {branch}",
+        f"Remote: {remote_state}",
+        f"Profile: {profile}",
         f"State:  {dirty}",
         f"Menu:   {menu_backend}",
     ]
@@ -1869,54 +2599,46 @@ def command_interactive_doctor_menu() -> None:
             return
 
 
-def command_interactive(_args: argparse.Namespace) -> int:
-    ensure_git_repo()
+def command_interactive_more_menu() -> None:
     actions = [
-        "Doctor",
-        "Undo / rollback",
-        "Quick guide",
-        "Status snapshot",
-        "Install safety guards",
-        "Switch branch",
-        "Sync current branch",
-        "Push current branch",
+        "Switch branch directly",
+        "Sync current branch (no push)",
+        "Push current branch only",
         "Draft commit message",
-        "Start feature branch",
-        "Save commit",
         "Ship dev -> main",
+        "Doctor tools",
+        "Undo / rollback tools",
+        "Workflow profile settings",
+        "Install safety guards",
         "Init repo defaults",
-        "Exit",
+        "Recent actions log",
+        "Quick guide",
+        "Back to main menu",
     ]
 
     dispatch = {
-        "Doctor": command_interactive_doctor_menu,
-        "Undo / rollback": command_interactive_undo_menu,
-        "Quick guide": run_interactive_quick_guide,
-        "Status snapshot": run_interactive_status_snapshot,
-        "Install safety guards": run_interactive_install_safety_guards,
-        "Switch branch": run_interactive_switch_branch,
-        "Sync current branch": run_interactive_sync_current_branch,
-        "Push current branch": run_interactive_push_current_branch,
+        "Switch branch directly": run_interactive_switch_branch,
+        "Sync current branch (no push)": run_interactive_sync_current_branch,
+        "Push current branch only": run_interactive_push_current_branch,
         "Draft commit message": run_interactive_draft_commit_message,
-        "Start feature branch": run_interactive_start_feature,
-        "Save commit": run_interactive_save_commit,
         "Ship dev -> main": run_interactive_ship,
+        "Doctor tools": command_interactive_doctor_menu,
+        "Undo / rollback tools": command_interactive_undo_menu,
+        "Workflow profile settings": run_interactive_profile_menu,
+        "Install safety guards": run_interactive_install_safety_guards,
         "Init repo defaults": run_interactive_init,
+        "Recent actions log": run_interactive_actions_log,
+        "Quick guide": run_interactive_quick_guide,
     }
 
-    print_box(
-        "gitcoach interactive mode",
-        interactive_context_lines()
-        + ["", "Search, pick, and run without memorizing flags."],
-    )
     while True:
         try:
-            picked = choose_option("Select an action", actions, allow_cancel=True)
+            picked = choose_option("More options", actions, allow_cancel=True)
         except UserCancelled:
-            return 0
+            return
 
-        if picked == "Exit":
-            return 0
+        if picked == "Back to main menu":
+            return
 
         action = dispatch[picked]
         try:
@@ -1926,10 +2648,125 @@ def command_interactive(_args: argparse.Namespace) -> int:
         except GitCoachError as err:
             print(f"[error] {err}")
 
-        if picked in {"Doctor", "Undo / rollback"}:
+        if picked in {"Doctor tools", "Undo / rollback tools", "Workflow profile settings"}:
             continue
 
-        if not prompt_confirm("Run another action?", default=True):
+        if not prompt_confirm("Run another advanced action?", default=True):
+            return
+
+
+def goal_help_lines(goal: str) -> list[str] | None:
+    hints = {
+        "Start new work on a branch": [
+            "Use when: you're starting a feature or fix.",
+            "Why: keeps main clean and avoids branch/switch confusion.",
+        ],
+        "Save my current changes (commit)": [
+            "Use when: you want a safe checkpoint in Git.",
+            "Why: creates a commit and can guide commit message quality.",
+        ],
+        "Share my work to GitHub (sync + push)": [
+            "Use when: your local commits are ready to publish.",
+            "Why: sync first reduces push conflicts, then push uploads commits.",
+        ],
+        "Get latest remote updates (sync only)": [
+            "Use when: your branch may be behind remote.",
+            "Why: updates local branch without publishing anything.",
+        ],
+        "Undo / recover something": [
+            "Use when: you staged/committed/restored the wrong thing.",
+            "Why: guided rollback options are safer than ad-hoc reset commands.",
+        ],
+        "Fix identity / contribution issues": [
+            "Use when: GitHub contributions are missing or email is wrong.",
+            "Why: Doctor scans identity and can rewrite old commit emails.",
+        ],
+        "See repo status right now": [
+            "Use when: you are unsure what state your branch is in.",
+            "Why: shows staged/unstaged/untracked + ahead/behind in one snapshot.",
+        ],
+        "Handle untracked files (.gitignore)": [
+            "Use when: random files keep showing up in status.",
+            "Why: suggests/apply .gitignore patterns from untracked files.",
+        ],
+        "Adjust safety settings": [
+            "Use when: you want stricter or faster Git behavior.",
+            "Why: switch workflow profiles (solo-safe/fast/strict) cleanly.",
+        ],
+        "Learn sync vs push": [
+            "Use when: you're unsure if you need sync, push, or both.",
+            "Why: simple explanation with a safe default workflow.",
+        ],
+    }
+    return hints.get(goal)
+
+
+def command_interactive(_args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    actions = [
+        "Start new work on a branch",
+        "Save my current changes (commit)",
+        "Share my work to GitHub (sync + push)",
+        "Get latest remote updates (sync only)",
+        "Undo / recover something",
+        "Fix identity / contribution issues",
+        "See repo status right now",
+        "Handle untracked files (.gitignore)",
+        "Adjust safety settings",
+        "Learn sync vs push",
+        "More options",
+        "Exit",
+    ]
+
+    dispatch = {
+        "Start new work on a branch": run_interactive_start_feature,
+        "Save my current changes (commit)": run_interactive_save_commit,
+        "Share my work to GitHub (sync + push)": run_interactive_publish_after_sync,
+        "Get latest remote updates (sync only)": run_interactive_sync_current_branch,
+        "Undo / recover something": command_interactive_undo_menu,
+        "Fix identity / contribution issues": command_interactive_doctor_menu,
+        "See repo status right now": run_interactive_status_snapshot,
+        "Handle untracked files (.gitignore)": run_interactive_ignore_helper,
+        "Adjust safety settings": run_interactive_profile_menu,
+        "Learn sync vs push": run_interactive_sync_vs_push_explainer,
+        "More options": command_interactive_more_menu,
+    }
+
+    print_box(
+        "What would you like to do?",
+        interactive_context_lines()
+        + ["", "Pick a goal first. GitCoach will handle the Git steps."],
+    )
+    while True:
+        try:
+            picked = choose_option("Choose your goal", actions, allow_cancel=True)
+        except UserCancelled:
+            return 0
+
+        if picked == "Exit":
+            return 0
+
+        hint_lines = goal_help_lines(picked)
+        if hint_lines:
+            print_box("Why this action", hint_lines)
+
+        action = dispatch[picked]
+        try:
+            action()
+        except UserCancelled:
+            print("[info] Action cancelled.")
+        except GitCoachError as err:
+            print(f"[error] {err}")
+
+        if picked in {
+            "Undo / recover something",
+            "Fix identity / contribution issues",
+            "Adjust safety settings",
+            "More options",
+        }:
+            continue
+
+        if not prompt_confirm("Do you want to do another task?", default=True):
             return 0
 
 
@@ -1940,11 +2777,20 @@ def command_doctor(args: argparse.Namespace) -> int:
         if args.max_depth < 0:
             raise GitCoachError("--max-depth must be >= 0.")
         target = (args.target_email or get_global_config("user.email") or "").strip().lower()
-        return doctor_scan_all_repos(
+        rc = doctor_scan_all_repos(
             Path(args.all_repos).expanduser(),
             max_depth=args.max_depth,
             target_email=target or None,
         )
+        log_action(
+            "doctor.scan_all_repos",
+            {
+                "root": str(Path(args.all_repos).expanduser()),
+                "max_depth": args.max_depth,
+                "target_email": target or None,
+            },
+        )
+        return rc
 
     ensure_git_repo()
     configured_name = get_config("user.name")
@@ -2008,6 +2854,16 @@ def command_doctor(args: argparse.Namespace) -> int:
                 git("push", "--force-with-lease", "--all", capture=False)
                 git("push", "--force-with-lease", "--tags", capture=False)
                 print("[ok] Force push complete.")
+            log_action(
+                "doctor.rewrite_email_history",
+                {
+                    "target_email": configured_email,
+                    "target_name": target_name,
+                    "old_emails": old_emails,
+                    "backup_branch": backup_branch,
+                    "push": args.push and not args.promote_main,
+                },
+            )
 
     if args.promote_main:
         source_branch = args.promote_source or current_branch()
@@ -2046,6 +2902,17 @@ def command_doctor(args: argparse.Namespace) -> int:
                     remote_name=args.remote,
                     main_branch=args.main_branch,
                 )
+        log_action(
+            "doctor.promote_main",
+            {
+                "source_branch": source_branch,
+                "main_branch": args.main_branch,
+                "archive_branch": archive_branch,
+                "remote": args.remote,
+                "push": args.push,
+                "set_github_default": args.set_github_default and args.push,
+            },
+        )
 
     return 0
 
@@ -2075,6 +2942,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing non-gitcoach hooks.",
     )
     p_guard.set_defaults(func=command_guard)
+
+    p_profile = subparsers.add_parser(
+        "profile",
+        help="Show or switch workflow profile presets (solo-safe, fast, strict).",
+    )
+    p_profile.add_argument(
+        "--set",
+        choices=sorted(PROFILE_PRESETS),
+        help="Apply this profile preset and save it to .gitcoach.yml.",
+    )
+    p_profile.add_argument(
+        "--install-guards",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="With --set, reinstall hooks so guard behavior matches the profile.",
+    )
+    p_profile.set_defaults(func=command_profile)
+
+    p_actions = subparsers.add_parser(
+        "actions",
+        help="Show recent gitcoach actions (rewrites, undo, guard/profile changes).",
+    )
+    p_actions.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="How many recent entries to show.",
+    )
+    p_actions.set_defaults(func=command_actions)
+
+    p_ignore = subparsers.add_parser(
+        "ignore",
+        help="Suggest or apply .gitignore patterns from current untracked files.",
+    )
+    p_ignore.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply patterns to .gitignore.",
+    )
+    p_ignore.add_argument(
+        "--pattern",
+        action="append",
+        default=[],
+        help="Pattern to apply. Repeat for multiple patterns.",
+    )
+    p_ignore.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation when applying patterns.",
+    )
+    p_ignore.set_defaults(func=command_ignore)
 
     p_start = subparsers.add_parser("start", help="Start a feature branch from dev.")
     p_start.add_argument("feature_name")
