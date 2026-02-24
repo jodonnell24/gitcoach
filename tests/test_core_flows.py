@@ -249,3 +249,8 @@ def test_interactive_fix_suggestions_cover_common_failures() -> None:
 def test_no_deprecated_interactive_phrase() -> None:
     source = Path(gitcoach.__file__).read_text(encoding="utf-8")
     assert "Learn sync vs push" not in source
+
+
+def test_quick_guide_not_in_advanced_menu() -> None:
+    assert gitcoach.GOAL_BASICS in gitcoach.INTERACTIVE_MAIN_ACTIONS
+    assert all("Quick guide" not in item for item in gitcoach.MORE_MENU_ACTIONS)

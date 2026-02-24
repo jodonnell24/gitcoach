@@ -57,7 +57,7 @@ Interactive menu now includes:
   - fix identity/contributions
   - handle untracked files
   - adjust safety settings
-- A built-in workflow-basics helper and a smaller `More options` menu for advanced actions.
+- A top-level quick guide for beginners, plus a smaller `More options` menu for advanced actions.
 - Interactive errors now suggest a next fix inside GitCoach instead of only showing raw failure text.
 - Friendly helper tone is used in interactive mode, while command-mode output stays mostly formal.
 

@@ -95,7 +95,6 @@ INTERACTIVE_COPY = {
     "confirm_loop_advanced": "Want to do another advanced task?",
     "confirm_apply_ignore": "Apply these patterns now?",
     "confirm_risky_local": f"{MASCOT_NAME} tip: this changes local history/worktree. Continue?",
-    "workflow_basics_title": f"{MASCOT_NAME} workflow basics",
     "workflow_guide_title": f"Simple workflow with {MASCOT_NAME}",
 }
 
@@ -108,7 +107,7 @@ GOAL_DOCTOR = "Fix identity or contribution issues"
 GOAL_STATUS = "Check repo status"
 GOAL_IGNORE = "Handle untracked files (.gitignore)"
 GOAL_SAFETY = "Adjust safety settings"
-GOAL_BASICS = "Understand workflow basics"
+GOAL_BASICS = "Quick guide (beginner flow)"
 GOAL_MORE = "More options (advanced)"
 GOAL_EXIT = "Exit"
 
@@ -165,8 +164,8 @@ INTERACTIVE_GOAL_HELP: dict[str, list[str]] = {
         f"Why: switch workflow profiles (solo-safe/fast/strict) cleanly.",
     ],
     GOAL_BASICS: [
-        "Use when: you're unsure what each major action does.",
-        f"Why: quick explanation of start/save/sync/push/share/undo.",
+        "Use when: you want the simplest recommended flow.",
+        f"Why: {MASCOT_NAME} gives a short beginner-safe sequence to follow.",
     ],
 }
 
@@ -217,7 +216,6 @@ MORE_MENU_ACTIONS = [
     "Install safety guards",
     "Init repo defaults",
     "Recent actions log",
-    "Quick guide",
     "Back to main menu",
 ]
 
@@ -2823,18 +2821,6 @@ def run_interactive_publish_after_sync() -> None:
     run_interactive_push_current_branch()
 
 
-def run_interactive_workflow_basics() -> None:
-    lines = [
-        f"{GOAL_START_WORK}: creates/switches to a feature branch.",
-        f"{GOAL_SAVE_CHANGES}: makes a commit checkpoint.",
-        f"{GOAL_SYNC_ONLY}: brings remote commits into your local branch.",
-        "Push changes: publishes your local commits to GitHub.",
-        f"{GOAL_SHARE_GITHUB}: runs sync first, then push.",
-        f"{GOAL_UNDO}: guided rollback options when something goes wrong.",
-    ]
-    print_box(INTERACTIVE_COPY["workflow_basics_title"], lines)
-
-
 def run_interactive_quick_guide() -> None:
     lines = [
         f"1) Keep main stable. Use {GOAL_START_WORK}.",
@@ -2917,7 +2903,6 @@ def command_interactive_more_menu() -> None:
         "Install safety guards": run_interactive_install_safety_guards,
         "Init repo defaults": run_interactive_init,
         "Recent actions log": run_interactive_actions_log,
-        "Quick guide": run_interactive_quick_guide,
     }
 
     while True:
@@ -2962,7 +2947,7 @@ def command_interactive(_args: argparse.Namespace) -> int:
         GOAL_STATUS: run_interactive_status_snapshot,
         GOAL_IGNORE: run_interactive_ignore_helper,
         GOAL_SAFETY: run_interactive_profile_menu,
-        GOAL_BASICS: run_interactive_workflow_basics,
+        GOAL_BASICS: run_interactive_quick_guide,
         GOAL_MORE: command_interactive_more_menu,
     }
 
