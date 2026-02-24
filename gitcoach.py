@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -205,6 +206,73 @@ def get_config(key: str) -> str | None:
     return value if value else None
 
 
+def get_global_config(key: str) -> str | None:
+    result = run(["git", "config", "--global", "--get", key], check=False)
+    value = (result.stdout or "").strip()
+    return value if result.returncode == 0 and value else None
+
+
+def git_in_repo(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    capture: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args], check=check, capture=capture)
+
+
+def find_git_repos(root: Path, max_depth: int = 3) -> list[Path]:
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise GitCoachError(f"Path does not exist or is not a directory: {root}")
+
+    repos: list[Path] = []
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.relative_to(root).parts)
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+
+        if ".git" in dirs:
+            repos.append(current_path)
+            dirs[:] = []
+            continue
+
+        if current_path == root and current_path.joinpath(".git").exists():
+            repos.append(current_path)
+            dirs[:] = []
+
+    return sorted(set(repos))
+
+
+def collect_history_emails_for_repo(repo: Path) -> dict[str, int]:
+    result = git_in_repo(repo, "log", "--all", "--format=%ae%n%ce", check=False)
+    if result.returncode != 0:
+        return {}
+    counts: dict[str, int] = {}
+    for raw in (result.stdout or "").splitlines():
+        email = raw.strip()
+        if not email:
+            continue
+        counts[email] = counts.get(email, 0) + 1
+    return counts
+
+
+def summarize_repo_identity(
+    repo: Path,
+    target_email: str | None,
+) -> tuple[str, str | None, int, int]:
+    local_email = (git_in_repo(repo, "config", "--get", "user.email", check=False).stdout or "").strip() or None
+    effective_email = local_email or get_global_config("user.email")
+    counts = collect_history_emails_for_repo(repo)
+    total_entries = sum(counts.values())
+    mismatch = 0
+    if target_email:
+        mismatch = sum(count for email, count in counts.items() if email.lower() != target_email.lower())
+    return (repo.name, effective_email, total_entries, mismatch)
+
+
 def list_local_branches() -> list[str]:
     result = git("for-each-ref", "--format=%(refname:short)", "refs/heads", check=False)
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -241,6 +309,115 @@ def status_counts() -> tuple[int, int, int]:
     return staged, unstaged, untracked
 
 
+def has_staged_changes() -> bool:
+    for raw in git("status", "--porcelain").stdout.splitlines():
+        if raw and not raw.startswith("??") and raw[0] != " ":
+            return True
+    return False
+
+
+def has_unstaged_changes() -> bool:
+    for raw in git("status", "--porcelain").stdout.splitlines():
+        if raw and not raw.startswith("??") and len(raw) > 1 and raw[1] != " ":
+            return True
+    return False
+
+
+def has_untracked_files() -> bool:
+    return bool(git("ls-files", "--others", "--exclude-standard").stdout.strip())
+
+
+def worktree_dirty() -> bool:
+    return bool(git("status", "--porcelain", check=False).stdout.strip())
+
+
+def has_parent_commit() -> bool:
+    result = git("rev-parse", "--verify", "HEAD~1", check=False)
+    return result.returncode == 0
+
+
+def changed_tracked_files() -> list[str]:
+    files: set[str] = set()
+    for args in (("diff", "--name-only"), ("diff", "--cached", "--name-only")):
+        result = git(*args, check=False)
+        for line in (result.stdout or "").splitlines():
+            name = line.strip()
+            if name:
+                files.add(name)
+    return sorted(files)
+
+
+def recent_commit_choices(limit: int = 30) -> list[tuple[str, str]]:
+    result = git("log", f"-n{limit}", "--pretty=format:%h%x09%s", check=False)
+    choices: list[tuple[str, str]] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split("\t", 1)
+        if not parts or not parts[0].strip():
+            continue
+        sha = parts[0].strip()
+        summary = parts[1].strip() if len(parts) > 1 else ""
+        choices.append((sha, f"{sha}  {summary}".strip()))
+    return choices
+
+
+def create_safety_stash(label: str) -> str | None:
+    result = git("stash", "push", "-u", "-m", label, check=False)
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if "No local changes to save" in output:
+        return None
+    ref = git("stash", "list", "-n", "1", "--format=%gd", check=False).stdout.strip()
+    return ref or "stash@{0}"
+
+
+def unique_branch_name(base: str) -> str:
+    if not branch_exists(base):
+        return base
+    for i in range(2, 100):
+        candidate = f"{base}-{i}"
+        if not branch_exists(candidate):
+            return candidate
+    return f"{base}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+
+def suggest_feature_branch_from_message(message: str) -> str:
+    subject = message.strip().splitlines()[0].strip() if message.strip() else "work"
+    summary = subject.split(": ", 1)[1] if ": " in subject else subject
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", summary.strip().lower()).strip("-")
+    if not slug:
+        slug = "work"
+    return f"feature/{slug[:48]}"
+
+
+def checkout_branch_with_changes(branch: str, *, autostash: bool = True) -> bool:
+    """Checkout existing branch or create it while carrying local changes.
+
+    Returns True when a temporary stash was used.
+    """
+    if not branch_exists(branch):
+        git("checkout", "-b", branch, capture=False)
+        return False
+
+    attempt = run(["git", "checkout", branch], check=False, capture=False)
+    if attempt.returncode == 0:
+        return False
+
+    if not autostash:
+        raise GitCoachError(
+            f"Could not switch to {branch} with local changes. "
+            "Retry with --autostash."
+        )
+
+    stash_ref = create_safety_stash(f"gitcoach-branch-switch-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    git("checkout", branch, capture=False)
+    if stash_ref:
+        pop = run(["git", "stash", "pop"], check=False, capture=False)
+        if pop.returncode != 0:
+            print("[warn] Stash pop had conflicts. Resolve and continue.")
+        else:
+            print("[ok] Restored local changes after branch switch.")
+    return True
+
+
 def ahead_behind(upstream: str) -> tuple[int, int]:
     result = git("rev-list", "--left-right", "--count", f"{upstream}...HEAD", check=False)
     if result.returncode != 0:
@@ -257,6 +434,77 @@ def ensure_clean_worktree() -> None:
     result = git("status", "--porcelain")
     if result.stdout.strip():
         raise GitCoachError("Working tree is not clean. Commit/stash changes first.")
+
+
+def install_safety_hooks(*, force: bool = False) -> tuple[list[str], list[str]]:
+    hook_dir = Path(git("rev-parse", "--git-path", "hooks").stdout.strip())
+    hook_dir.mkdir(parents=True, exist_ok=True)
+
+    pre_commit = hook_dir / "pre-commit"
+    pre_push = hook_dir / "pre-push"
+    marker = "gitcoach guard hook"
+
+    pre_commit_body = """#!/bin/sh
+# gitcoach guard hook
+branch="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+  if [ -z "${GITCOACH_ALLOW_MAIN_COMMIT:-}" ]; then
+    echo "[gitcoach] Commit blocked on $branch."
+    echo "[gitcoach] Use a feature branch, or bypass once with GITCOACH_ALLOW_MAIN_COMMIT=1."
+    exit 1
+  fi
+fi
+exit 0
+"""
+
+    pre_push_body = """#!/bin/sh
+# gitcoach guard hook
+zero="0000000000000000000000000000000000000000"
+while read local_ref local_sha remote_ref remote_sha
+do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      if [ -z "${GITCOACH_ALLOW_MAIN_PUSH:-}" ]; then
+        echo "[gitcoach] Push blocked to ${remote_ref#refs/heads/}."
+        echo "[gitcoach] Push from dev/feature branches and merge intentionally."
+        echo "[gitcoach] Bypass once with GITCOACH_ALLOW_MAIN_PUSH=1."
+        exit 1
+      fi
+      ;;
+  esac
+
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  if [ "$remote_sha" = "$zero" ]; then
+    continue
+  fi
+
+  if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
+    if [ -z "${GITCOACH_ALLOW_FORCE_PUSH:-}" ]; then
+      echo "[gitcoach] Non-fast-forward push blocked on ${remote_ref#refs/heads/}."
+      echo "[gitcoach] Bypass once with GITCOACH_ALLOW_FORCE_PUSH=1."
+      exit 1
+    fi
+  fi
+done
+exit 0
+"""
+
+    installed: list[str] = []
+    skipped: list[str] = []
+
+    for hook_path, body in ((pre_commit, pre_commit_body), (pre_push, pre_push_body)):
+        if hook_path.exists():
+            existing = hook_path.read_text(encoding="utf-8", errors="ignore")
+            if marker not in existing and not force:
+                skipped.append(hook_path.name)
+                continue
+        hook_path.write_text(body, encoding="utf-8")
+        hook_path.chmod(0o755)
+        installed.append(hook_path.name)
+
+    return installed, skipped
 
 
 def slugify_feature_name(value: str) -> str:
@@ -389,6 +637,8 @@ def choose_multiple_options(prompt: str, options: list[str]) -> list[str]:
 def make_doctor_args(**overrides: object) -> argparse.Namespace:
     payload: dict[str, object] = {
         "target_email": None,
+        "all_repos": None,
+        "max_depth": 3,
         "target_name": None,
         "old_email": [],
         "fix_email_history": False,
@@ -431,15 +681,51 @@ def command_init(args: argparse.Namespace) -> int:
     else:
         print("[warn] No commits yet. Create initial commit before branch setup.")
 
+    if args.install_guards:
+        installed, skipped = install_safety_hooks(force=False)
+        if installed:
+            print(f"[ok] Installed safety hooks: {', '.join(installed)}")
+        if skipped:
+            print(f"[warn] Skipped existing non-gitcoach hooks: {', '.join(skipped)}")
+            print("       Re-run with: gitcoach guard --force")
+
+    return 0
+
+
+def command_guard(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    installed, skipped = install_safety_hooks(force=args.force)
+    if installed:
+        print(f"[ok] Installed/updated safety hooks: {', '.join(installed)}")
+    if skipped:
+        print(f"[warn] Existing non-gitcoach hooks preserved: {', '.join(skipped)}")
+        print("       Re-run with --force to overwrite them.")
+    if not installed and not skipped:
+        print("[info] No hook changes made.")
     return 0
 
 
 def command_start(args: argparse.Namespace) -> int:
     ensure_git_repo()
-    ensure_clean_worktree()
-
     feature_branch = f"feature/{slugify_feature_name(args.feature_name)}"
     dev_branch = args.dev_branch
+    dirty = worktree_dirty()
+
+    if dirty:
+        current = current_branch()
+        print(
+            f"[info] Detected local changes on {current}. "
+            "Carrying them to feature branch."
+        )
+        created = not branch_exists(feature_branch)
+        used_stash = checkout_branch_with_changes(feature_branch, autostash=args.autostash)
+        if created:
+            print(f"[ok] Created and switched to: {feature_branch}")
+        else:
+            print(f"[ok] Switched to existing branch: {feature_branch}")
+        if used_stash:
+            print("[ok] Used temporary stash to preserve changes during switch.")
+        return 0
 
     if not branch_exists(dev_branch):
         raise GitCoachError(f"Missing {dev_branch} branch. Run: gitcoach init")
@@ -467,6 +753,235 @@ def print_untracked_preview() -> None:
     print("       Use --include-untracked to stage everything.")
 
 
+def staged_files() -> list[str]:
+    result = git("diff", "--cached", "--name-only", check=False)
+    return sorted([line.strip() for line in (result.stdout or "").splitlines() if line.strip()])
+
+
+def infer_commit_type(files: list[str]) -> str:
+    if not files:
+        return "chore"
+
+    def file_kind(path: str) -> str:
+        p = path.lower()
+        parts = p.split("/")
+        name = parts[-1]
+        if p.startswith("docs/") or name.endswith((".md", ".rst", ".txt")):
+            return "docs"
+        if "test" in parts or name.endswith(("_test.py", ".test.js", ".spec.ts", ".spec.js")):
+            return "test"
+        if p.startswith(".github/") or "workflow" in parts:
+            return "ci"
+        if name in {"package-lock.json", "poetry.lock", "yarn.lock", "pnpm-lock.yaml", "cargo.lock"}:
+            return "chore"
+        return "code"
+
+    kinds = {file_kind(path) for path in files}
+    if kinds == {"docs"}:
+        return "docs"
+    if kinds == {"test"}:
+        return "test"
+    if kinds == {"ci"}:
+        return "ci"
+    if kinds == {"chore"}:
+        return "chore"
+    return "feat"
+
+
+def infer_commit_scope(files: list[str]) -> str | None:
+    tops = {path.split("/", 1)[0] for path in files if "/" in path}
+    if len(tops) == 1:
+        scope = next(iter(tops))
+        if scope not in {".github"}:
+            return scope
+    return None
+
+
+def infer_commit_subject(files: list[str]) -> str:
+    commit_type = infer_commit_type(files)
+    scope = infer_commit_scope(files)
+
+    if len(files) == 1:
+        target = files[0]
+    elif scope:
+        target = f"{scope} files"
+    else:
+        target = "project files"
+
+    verbs = {
+        "feat": "update",
+        "fix": "fix",
+        "docs": "document",
+        "test": "add tests for",
+        "chore": "update",
+        "ci": "adjust",
+    }
+    verb = verbs.get(commit_type, "update")
+    prefix = f"{commit_type}({scope})" if scope else commit_type
+    return f"{prefix}: {verb} {target}"
+
+
+def commit_message_warnings(message: str) -> list[str]:
+    warnings: list[str] = []
+    subject = message.strip().splitlines()[0].strip() if message.strip() else ""
+    if not subject:
+        return ["Subject line is empty."]
+    if len(subject) < 12:
+        warnings.append("Subject is very short. Add more context.")
+    if len(subject) > 72:
+        warnings.append("Subject is longer than 72 characters.")
+    if subject.endswith("."):
+        warnings.append("Subject ends with a period; style is usually without trailing punctuation.")
+    if re.search(r"\b(wip|temp|misc|stuff|quick fix)\b", subject, re.IGNORECASE):
+        warnings.append("Subject uses vague wording (wip/temp/misc/stuff).")
+    if not re.match(r"^[a-z]+(\([^)]+\))?: .+", subject):
+        warnings.append("Subject does not follow `type(scope): summary` pattern.")
+    return warnings
+
+
+def write_commit_with_message(message: str) -> None:
+    git_dir = Path(git("rev-parse", "--git-dir").stdout.strip())
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="gitcoach-msg-",
+        suffix=".txt",
+        dir=str(git_dir),
+        delete=False,
+    ) as handle:
+        handle.write(message.rstrip() + "\n")
+        msg_path = handle.name
+
+    try:
+        git("commit", "-F", msg_path)
+    finally:
+        Path(msg_path).unlink(missing_ok=True)
+
+
+def compose_commit_message_guided(files: list[str]) -> str:
+    default_type = infer_commit_type(files)
+    default_scope = infer_commit_scope(files)
+    default_subject = infer_commit_subject(files)
+
+    preview_files = files[:8]
+    preview_lines = [f"staged files: {len(files)}"] + [f"- {item}" for item in preview_files]
+    if len(files) > 8:
+        preview_lines.append(f"... {len(files) - 8} more")
+    print_box("Commit message helper", preview_lines)
+
+    type_options = [
+        "feat - behavior or feature change",
+        "fix - bug fix",
+        "refactor - internal code cleanup",
+        "docs - docs/content updates",
+        "test - tests only",
+        "chore - maintenance and tooling",
+        "ci - pipeline/workflow change",
+    ]
+    picked_type = choose_option("Choose commit type", type_options, allow_cancel=False).split(" - ", 1)[0]
+    scope = prompt_text("Scope (optional)", default=default_scope or None).strip()
+
+    suggested_summary = default_subject.split(": ", 1)[1] if ": " in default_subject else default_subject
+    summary = prompt_text("Summary (imperative, short)", default=suggested_summary, required=True).strip()
+
+    subject = f"{picked_type}({scope}): {summary}" if scope else f"{picked_type}: {summary}"
+
+    body_raw = prompt_text("Optional details (use ';' for bullet splits)").strip()
+    message = subject
+    if body_raw:
+        parts = [item.strip() for item in body_raw.split(";") if item.strip()]
+        if len(parts) > 1:
+            message += "\n\n" + "\n".join(f"- {part}" for part in parts)
+        else:
+            message += "\n\n" + parts[0]
+
+    warnings = commit_message_warnings(message)
+    preview = message.splitlines() or [message]
+    if warnings:
+        preview += ["", "Warnings:"] + [f"- {item}" for item in warnings]
+    print_box("Proposed commit message", preview)
+    if not prompt_confirm("Use this message?", default=True):
+        raise UserCancelled
+    return message
+
+
+def choose_commit_message(
+    *,
+    explicit_message: str | None,
+    guided: bool,
+    files: list[str],
+) -> str:
+    message = (explicit_message or "").strip()
+    if guided or not message:
+        if not is_interactive_tty():
+            raise GitCoachError("No commit message provided. Use --guided in an interactive terminal or pass a message.")
+        return compose_commit_message_guided(files)
+    return message
+
+
+def print_commit_message_hints(files: list[str]) -> None:
+    suggestion = infer_commit_subject(files)
+    print("[info] Suggested subject format:")
+    print(f"       {suggestion}")
+    print("       Example with details:")
+    print(f"       {suggestion}\n")
+    print("       - explain why")
+    print("       - note risk/test impact")
+
+
+def command_message(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    files = staged_files()
+    if not files:
+        files = changed_tracked_files()
+    if not files:
+        raise GitCoachError("No changed files found. Stage or modify files first.")
+
+    if args.guided:
+        if not is_interactive_tty():
+            raise GitCoachError("--guided requires an interactive terminal.")
+        message = compose_commit_message_guided(files)
+        print("\n" + message)
+        return 0
+
+    print_commit_message_hints(files)
+    return 0
+
+
+def handle_main_commit_block(
+    message: str,
+    err: GitCoachError,
+) -> bool:
+    branch = current_branch()
+    if branch not in {"main", "master"}:
+        return False
+
+    detail = str(err).lower()
+    if "commit blocked" not in detail and "pre-commit hook" not in detail and "main" not in detail:
+        return False
+
+    suggested = unique_branch_name(suggest_feature_branch_from_message(message))
+    if is_interactive_tty():
+        print(
+            f"[warn] Commit on {branch} was blocked by safety guard."
+        )
+        if not prompt_confirm(
+            f"Create {suggested} and commit there instead?",
+            default=True,
+        ):
+            return False
+    else:
+        print(
+            f"[warn] Commit on {branch} was blocked. "
+            f"Auto-creating {suggested} and retrying commit."
+        )
+
+    checkout_branch_with_changes(suggested, autostash=True)
+    write_commit_with_message(message)
+    print(f"[ok] Commit created on {suggested}")
+    return True
+
+
 def command_save(args: argparse.Namespace) -> int:
     ensure_git_repo()
 
@@ -476,11 +991,31 @@ def command_save(args: argparse.Namespace) -> int:
         git("add", "-u", capture=False)
         print_untracked_preview()
 
-    staged = git("diff", "--cached", "--name-only")
-    if not staged.stdout.strip():
+    files = staged_files()
+    if not files:
         raise GitCoachError("No staged tracked changes to commit.")
 
-    git("commit", "-m", args.message, capture=False)
+    message = choose_commit_message(
+        explicit_message=args.message,
+        guided=args.guided,
+        files=files,
+    )
+    warnings = commit_message_warnings(message)
+    if warnings:
+        print("[warn] Commit message quality hints:")
+        for item in warnings:
+            print(f"       - {item}")
+        if args.strict_message:
+            raise GitCoachError("Commit message did not pass --strict-message checks.")
+        if is_interactive_tty() and not prompt_confirm("Commit anyway?", default=True):
+            raise UserCancelled
+
+    try:
+        write_commit_with_message(message)
+    except GitCoachError as err:
+        if handle_main_commit_block(message, err):
+            return 0
+        raise
     print("[ok] Commit created")
     return 0
 
@@ -562,9 +1097,9 @@ def select_emails_to_rewrite(
     return sorted(set(selected))
 
 
-def create_backup_branch() -> str:
+def create_backup_branch(prefix: str = "backup/email-rewrite") -> str:
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = f"backup/email-rewrite-{timestamp}"
+    backup = f"{prefix}-{timestamp}"
     git("branch", backup)
     return backup
 
@@ -768,8 +1303,80 @@ def maybe_set_github_default_branch(
     print(f"[ok] Updated GitHub default branch to {main_branch} for {slug}")
 
 
+def doctor_scan_all_repos(root: Path, max_depth: int, target_email: str | None) -> int:
+    repos = find_git_repos(root, max_depth=max_depth)
+    if not repos:
+        print(f"[warn] No Git repositories found under {root}")
+        return 0
+
+    print(
+        f"[info] Scanning {len(repos)} repo(s) under {root} "
+        f"(depth={max_depth}, target={target_email or 'none'})"
+    )
+    print_rule()
+
+    ok_count = 0
+    warn_count = 0
+    missing_email = 0
+    no_commits = 0
+
+    for repo in repos:
+        name, effective_email, total_entries, mismatch = summarize_repo_identity(repo, target_email)
+        email_display = effective_email or "(unset)"
+        if effective_email is None:
+            missing_email += 1
+
+        if total_entries == 0:
+            no_commits += 1
+            status = "[info]"
+            detail = "no commits"
+        elif target_email and mismatch > 0:
+            warn_count += 1
+            status = "[warn]"
+            detail = f"{mismatch}/{total_entries} identity entries differ from target"
+        else:
+            ok_count += 1
+            status = "[ok]"
+            detail = f"{total_entries} identity entries checked"
+
+        print(f"{status} {name}: {detail}")
+        print(f"       path: {repo}")
+        print(f"       email: {email_display}")
+
+    print_rule()
+    print(
+        f"[info] Summary: ok={ok_count}, warn={warn_count}, "
+        f"missing-email={missing_email}, no-commits={no_commits}"
+    )
+    if warn_count > 0 and target_email:
+        print("[info] Use per-repo doctor fix where needed:")
+        print("       cd <repo> && gitcoach doctor --fix-email-history --target-email <email> --yes")
+
+    return 0
+
+
 def run_interactive_doctor_scan() -> None:
     command_doctor(make_doctor_args())
+
+
+def run_interactive_doctor_scan_folder() -> None:
+    ensure_git_repo()
+    repo_root = Path(git("rev-parse", "--show-toplevel").stdout.strip())
+    default_root = str(repo_root.parent)
+    configured_email = get_config("user.email") or get_global_config("user.email") or ""
+
+    root_text = prompt_text("Folder to scan for repos", default=default_root, required=True)
+    depth_text = prompt_text("Max folder depth", default="3", required=True)
+    target = prompt_text("Target email (blank to only inventory)", default=configured_email or None).strip().lower()
+
+    try:
+        max_depth = int(depth_text)
+    except ValueError as err:
+        raise GitCoachError("Max folder depth must be an integer.") from err
+    if max_depth < 0:
+        raise GitCoachError("Max folder depth must be >= 0.")
+
+    doctor_scan_all_repos(Path(root_text).expanduser(), max_depth=max_depth, target_email=target or None)
 
 
 def run_interactive_doctor_set_identity() -> None:
@@ -940,14 +1547,36 @@ def run_interactive_start_feature() -> None:
     ensure_git_repo()
     feature_name = prompt_text("Feature name", required=True)
     dev_branch = prompt_text("Dev branch", default="dev", required=True)
-    command_start(argparse.Namespace(feature_name=feature_name, dev_branch=dev_branch))
+    autostash = prompt_confirm("Auto-stash if branch switch needs it?", default=True)
+    command_start(
+        argparse.Namespace(
+            feature_name=feature_name,
+            dev_branch=dev_branch,
+            autostash=autostash,
+        )
+    )
 
 
 def run_interactive_save_commit() -> None:
     ensure_git_repo()
-    message = prompt_text("Commit message", required=True)
     include_untracked = prompt_confirm("Include untracked files?", default=False)
-    command_save(argparse.Namespace(message=message, include_untracked=include_untracked))
+    guided = prompt_confirm("Use commit message helper?", default=True)
+    message = None
+    if not guided:
+        message = prompt_text("Commit message", required=True)
+    command_save(
+        argparse.Namespace(
+            message=message,
+            include_untracked=include_untracked,
+            guided=guided,
+            strict_message=False,
+        )
+    )
+
+
+def run_interactive_draft_commit_message() -> None:
+    ensure_git_repo()
+    command_message(argparse.Namespace(guided=True))
 
 
 def run_interactive_ship() -> None:
@@ -962,7 +1591,143 @@ def run_interactive_init() -> None:
     ensure_git_repo()
     main_branch = prompt_text("Main branch", default=pick_main_branch("main"), required=True)
     dev_branch = prompt_text("Dev branch", default="dev", required=True)
-    command_init(argparse.Namespace(main_branch=main_branch, dev_branch=dev_branch))
+    install_guards = prompt_confirm("Install safety guard hooks?", default=True)
+    command_init(
+        argparse.Namespace(
+            main_branch=main_branch,
+            dev_branch=dev_branch,
+            install_guards=install_guards,
+        )
+    )
+
+
+def run_interactive_install_safety_guards() -> None:
+    ensure_git_repo()
+    force = prompt_confirm("Overwrite existing non-gitcoach hooks?", default=False)
+    command_guard(argparse.Namespace(force=force))
+
+
+def undo_unstage_all() -> None:
+    if not has_staged_changes():
+        print("[info] No staged changes to unstage.")
+        return
+    git("restore", "--staged", ".", capture=False)
+    print("[ok] Unstaged all staged files.")
+
+
+def undo_discard_unstaged() -> None:
+    if not has_unstaged_changes():
+        print("[info] No unstaged tracked changes to discard.")
+        return
+
+    stash_ref = None
+    if prompt_confirm("Create safety stash before discard?", default=True):
+        stash_ref = create_safety_stash(f"gitcoach-undo-discard-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    git("restore", ".", capture=False)
+    if stash_ref:
+        print(f"[ok] Discarded unstaged changes (safety stash: {stash_ref})")
+    else:
+        print("[ok] Discarded unstaged changes.")
+
+
+def undo_last_commit(*, keep_staged: bool) -> None:
+    if not repo_has_commits() or not has_parent_commit():
+        raise GitCoachError("Need at least two commits to undo the last commit safely.")
+
+    backup = create_backup_branch("backup/undo-reset")
+    if keep_staged:
+        git("reset", "--soft", "HEAD~1", capture=False)
+        print(f"[ok] Undid last commit and kept changes staged. Backup: {backup}")
+    else:
+        git("reset", "HEAD~1", capture=False)
+        print(f"[ok] Undid last commit and left changes unstaged. Backup: {backup}")
+
+
+def undo_revert_commit() -> None:
+    commits = recent_commit_choices(limit=30)
+    if not commits:
+        raise GitCoachError("No commits found to revert.")
+
+    picked = choose_option(
+        "Choose commit to revert",
+        [label for _sha, label in commits],
+        allow_cancel=False,
+    )
+    lookup = {label: sha for sha, label in commits}
+    sha = lookup[picked]
+    git("revert", "--no-edit", sha, capture=False)
+    print(f"[ok] Reverted commit {sha}.")
+
+
+def undo_restore_file_to_head() -> None:
+    files = changed_tracked_files()
+    if not files:
+        print("[info] No tracked file changes to restore.")
+        return
+    file_path = choose_option("Choose file to restore from HEAD", files, allow_cancel=False)
+    stash_ref = None
+    if prompt_confirm("Create safety stash before restore?", default=True):
+        stash_ref = create_safety_stash(f"gitcoach-undo-file-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    git("restore", "--source=HEAD", "--staged", "--worktree", "--", file_path, capture=False)
+    if stash_ref:
+        print(f"[ok] Restored {file_path} to HEAD (safety stash: {stash_ref})")
+    else:
+        print(f"[ok] Restored {file_path} to HEAD.")
+
+
+def command_interactive_undo_menu() -> None:
+    actions = [
+        "Unstage all staged files",
+        "Discard unstaged tracked changes",
+        "Undo last commit (keep changes staged)",
+        "Undo last commit (keep changes unstaged)",
+        "Revert a commit (safe history)",
+        "Restore one file to HEAD",
+        "Back to main menu",
+    ]
+    dispatch = {
+        "Unstage all staged files": undo_unstage_all,
+        "Discard unstaged tracked changes": undo_discard_unstaged,
+        "Undo last commit (keep changes staged)": lambda: undo_last_commit(keep_staged=True),
+        "Undo last commit (keep changes unstaged)": lambda: undo_last_commit(keep_staged=False),
+        "Revert a commit (safe history)": undo_revert_commit,
+        "Restore one file to HEAD": undo_restore_file_to_head,
+    }
+
+    while True:
+        try:
+            picked = choose_option("Undo actions", actions, allow_cancel=True)
+        except UserCancelled:
+            return
+
+        if picked == "Back to main menu":
+            return
+
+        if picked in {
+            "Discard unstaged tracked changes",
+            "Undo last commit (keep changes staged)",
+            "Undo last commit (keep changes unstaged)",
+            "Restore one file to HEAD",
+        }:
+            if not prompt_confirm("This changes local history/worktree. Continue?", default=False):
+                continue
+
+        action = dispatch[picked]
+        try:
+            action()
+        except UserCancelled:
+            print("[info] Undo action cancelled.")
+        except GitCoachError as err:
+            print(f"[error] {err}")
+
+        if not prompt_confirm("Run another Undo action?", default=True):
+            return
+
+
+def command_undo(_args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    command_interactive_undo_menu()
+    return 0
 
 
 def run_interactive_status_snapshot() -> None:
@@ -1040,6 +1805,18 @@ def run_interactive_push_current_branch() -> None:
     print(f"[ok] Pushed {branch} to {remote}/{branch} and set upstream")
 
 
+def run_interactive_quick_guide() -> None:
+    lines = [
+        "1) Keep main stable. Start work on feature branches.",
+        "2) Commit small, clear changes. Push often.",
+        "3) Sync before shipping: fetch + rebase/pull.",
+        "4) Merge feature/dev back into main intentionally.",
+        "5) Use Doctor for identity checks and contribution fixes.",
+        "6) Use Undo menu for safe rollbacks instead of panic commands.",
+    ]
+    print_box("Simple Git workflow (solo/noob friendly)", lines)
+
+
 def interactive_context_lines() -> list[str]:
     repo_root = git("rev-parse", "--show-toplevel").stdout.strip()
     branch = current_branch()
@@ -1057,6 +1834,7 @@ def interactive_context_lines() -> list[str]:
 def command_interactive_doctor_menu() -> None:
     actions = [
         "Scan identity issues",
+        "Scan folder for identity issues",
         "Set git identity (name/email)",
         "Fix email history",
         "Promote branch to main",
@@ -1064,6 +1842,7 @@ def command_interactive_doctor_menu() -> None:
     ]
     dispatch = {
         "Scan identity issues": run_interactive_doctor_scan,
+        "Scan folder for identity issues": run_interactive_doctor_scan_folder,
         "Set git identity (name/email)": run_interactive_doctor_set_identity,
         "Fix email history": run_interactive_doctor_fix,
         "Promote branch to main": run_interactive_promote_main,
@@ -1094,10 +1873,14 @@ def command_interactive(_args: argparse.Namespace) -> int:
     ensure_git_repo()
     actions = [
         "Doctor",
+        "Undo / rollback",
+        "Quick guide",
         "Status snapshot",
+        "Install safety guards",
         "Switch branch",
         "Sync current branch",
         "Push current branch",
+        "Draft commit message",
         "Start feature branch",
         "Save commit",
         "Ship dev -> main",
@@ -1107,10 +1890,14 @@ def command_interactive(_args: argparse.Namespace) -> int:
 
     dispatch = {
         "Doctor": command_interactive_doctor_menu,
+        "Undo / rollback": command_interactive_undo_menu,
+        "Quick guide": run_interactive_quick_guide,
         "Status snapshot": run_interactive_status_snapshot,
+        "Install safety guards": run_interactive_install_safety_guards,
         "Switch branch": run_interactive_switch_branch,
         "Sync current branch": run_interactive_sync_current_branch,
         "Push current branch": run_interactive_push_current_branch,
+        "Draft commit message": run_interactive_draft_commit_message,
         "Start feature branch": run_interactive_start_feature,
         "Save commit": run_interactive_save_commit,
         "Ship dev -> main": run_interactive_ship,
@@ -1139,7 +1926,7 @@ def command_interactive(_args: argparse.Namespace) -> int:
         except GitCoachError as err:
             print(f"[error] {err}")
 
-        if picked == "Doctor":
+        if picked in {"Doctor", "Undo / rollback"}:
             continue
 
         if not prompt_confirm("Run another action?", default=True):
@@ -1147,9 +1934,21 @@ def command_interactive(_args: argparse.Namespace) -> int:
 
 
 def command_doctor(args: argparse.Namespace) -> int:
+    if args.all_repos:
+        if args.fix_email_history or args.promote_main:
+            raise GitCoachError("--all-repos is scan-only. Run per-repo doctor for rewrite/promote actions.")
+        if args.max_depth < 0:
+            raise GitCoachError("--max-depth must be >= 0.")
+        target = (args.target_email or get_global_config("user.email") or "").strip().lower()
+        return doctor_scan_all_repos(
+            Path(args.all_repos).expanduser(),
+            max_depth=args.max_depth,
+            target_email=target or None,
+        )
+
     ensure_git_repo()
     configured_name = get_config("user.name")
-    configured_email = (args.target_email or get_config("user.email") or "").strip().lower()
+    configured_email = (args.target_email or get_config("user.email") or get_global_config("user.email") or "").strip().lower()
 
     if configured_name:
         print(f"[ok] user.name: {configured_name}")
@@ -1261,17 +2060,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = subparsers.add_parser("init", help="Bootstrap branches and config.")
     p_init.add_argument("--main-branch", default="main")
     p_init.add_argument("--dev-branch", default="dev")
+    p_init.add_argument(
+        "--install-guards",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Install safety pre-commit/pre-push hooks.",
+    )
     p_init.set_defaults(func=command_init)
+
+    p_guard = subparsers.add_parser("guard", help="Install or refresh gitcoach safety hooks.")
+    p_guard.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing non-gitcoach hooks.",
+    )
+    p_guard.set_defaults(func=command_guard)
 
     p_start = subparsers.add_parser("start", help="Start a feature branch from dev.")
     p_start.add_argument("feature_name")
     p_start.add_argument("--dev-branch", default="dev")
+    p_start.add_argument(
+        "--autostash",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When local changes block switching, stash/pop automatically.",
+    )
     p_start.set_defaults(func=command_start)
 
     p_save = subparsers.add_parser("save", help="Commit tracked changes safely.")
-    p_save.add_argument("message")
+    p_save.add_argument("message", nargs="?")
     p_save.add_argument("--include-untracked", action="store_true")
+    p_save.add_argument(
+        "--guided",
+        action="store_true",
+        help="Use guided commit message helper.",
+    )
+    p_save.add_argument(
+        "--strict-message",
+        action="store_true",
+        help="Fail commit when message quality warnings are detected.",
+    )
     p_save.set_defaults(func=command_save)
+
+    p_message = subparsers.add_parser(
+        "message",
+        help="Draft helpful commit message suggestions from changed files.",
+    )
+    p_message.add_argument(
+        "--guided",
+        action="store_true",
+        help="Open interactive message composer and print resulting message.",
+    )
+    p_message.set_defaults(func=command_message)
 
     p_ship = subparsers.add_parser("ship", help="Fast-forward dev into main.")
     p_ship.add_argument("--main-branch", default="main")
@@ -1286,11 +2126,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_interactive.set_defaults(func=command_interactive)
 
+    p_undo = subparsers.add_parser(
+        "undo",
+        aliases=["rollback"],
+        help="Open interactive undo/rollback actions.",
+    )
+    p_undo.set_defaults(func=command_undo)
+
     p_doctor = subparsers.add_parser(
         "doctor",
         help="Diagnose Git identity problems and optionally rewrite email history.",
     )
     p_doctor.add_argument("--target-email", help="Email to enforce across history.")
+    p_doctor.add_argument(
+        "--all-repos",
+        help="Scan all Git repos under this folder for identity issues (scan-only mode).",
+    )
+    p_doctor.add_argument(
+        "--max-depth",
+        type=int,
+        default=3,
+        help="Maximum folder depth for --all-repos scans.",
+    )
     p_doctor.add_argument("--target-name", help="Name to enforce when rewriting.")
     p_doctor.add_argument(
         "--old-email",

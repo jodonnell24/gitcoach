@@ -2,18 +2,27 @@
 
 Small, opinionated Git helper for solo developers.
 
+![GitCoach mascot](gitcoach-mascot.svg)
+
 ## Why
 
 `gitcoach` focuses on common pain points:
 
 - Keeping `dev` and `main` separated without extra ceremony
 - Avoiding accidental commits of untracked files
+- Safe undo/rollback actions without scary git commands
 - Shipping safely with fast-forward merges
 - Diagnosing and fixing GitHub contributions issues caused by wrong commit email
 
 ## Commands
 
 Run via:
+
+```bash
+gitcoach <command> [flags]
+```
+
+During development you can still run:
 
 ```bash
 python3 gitcoach.py <command> [flags]
@@ -37,8 +46,12 @@ GITCOACH_NO_GUM=1 python3 gitcoach.py
 
 Interactive menu now includes:
 
-- `Doctor` submenu (scan, set identity, fix email history, promote to main, back)
+- `Doctor` submenu (repo scan, folder scan, set identity, fix email history, promote to main)
+- `Undo / rollback` submenu (unstage, discard, undo commit, revert commit, restore file)
+- `Quick guide` (best-practice flow for noobs/vibecoders)
 - `Status snapshot`
+- `Install safety guards`
+- `Draft commit message` helper
 - `Switch branch`
 - `Sync current branch`
 - `Push current branch`
@@ -47,13 +60,95 @@ Interactive menu now includes:
 Core commands:
 
 ```bash
-python3 gitcoach.py init
-python3 gitcoach.py start "my feature"
+python3 gitcoach.py init                  # installs safety guards by default
+python3 gitcoach.py guard                 # install/refresh safety hooks
+python3 gitcoach.py start "my feature"    # carries dirty changes to new branch
+python3 gitcoach.py message               # suggest a good commit message
+python3 gitcoach.py save --guided         # commit with guided message helper
 python3 gitcoach.py save "commit message"
+python3 gitcoach.py undo                  # open undo/rollback actions
 python3 gitcoach.py ship --push
 python3 gitcoach.py doctor
 python3 gitcoach.py interactive
 ```
+
+## Installation
+
+From PyPI:
+
+```bash
+pipx install gitcoach
+```
+
+From local checkout:
+
+```bash
+pipx install .
+```
+
+## Commit Message Help
+
+Draft suggestions:
+
+```bash
+python3 gitcoach.py message
+```
+
+Interactive guided writer:
+
+```bash
+python3 gitcoach.py message --guided
+python3 gitcoach.py save --guided
+```
+
+Optional strict check:
+
+```bash
+python3 gitcoach.py save --guided --strict-message
+```
+
+## 60-Second Quickstart
+
+Install with pipx:
+
+```bash
+pipx install gitcoach
+```
+
+Try a safe beginner flow:
+
+```bash
+gitcoach init
+gitcoach start "my first change"
+gitcoach save --guided
+gitcoach ship
+```
+
+## Safety Guards
+
+`gitcoach guard` installs:
+
+- `pre-commit`: blocks commits directly on `main`/`master` unless explicitly bypassed
+- `pre-push`: blocks pushes to `main`/`master` and blocks non-fast-forward pushes by default
+
+Bypass env vars (one-off, advanced users):
+
+```bash
+GITCOACH_ALLOW_MAIN_COMMIT=1 git commit -m "..."
+GITCOACH_ALLOW_MAIN_PUSH=1 git push origin main
+GITCOACH_ALLOW_FORCE_PUSH=1 git push --force-with-lease
+```
+
+If you already have custom hooks and want to overwrite them:
+
+```bash
+python3 gitcoach.py guard --force
+```
+
+Noob-friendly behavior when guards are enabled:
+
+- If `save` is blocked on `main`, `gitcoach` offers to auto-create a feature branch and retries commit there.
+- `start` works even with dirty changes; it carries your work into the feature branch automatically.
 
 ## Contribution Email Fix
 
@@ -64,6 +159,14 @@ Preview problems:
 ```bash
 python3 gitcoach.py doctor
 ```
+
+Scan many repos at once (scan-only):
+
+```bash
+python3 gitcoach.py doctor --all-repos ~/projects --target-email you@example.com
+```
+
+`--all-repos` is scan-only by design; run per-repo `doctor --fix-email-history` when you decide to rewrite.
 
 Rewrite history to configured `user.email`:
 
@@ -113,6 +216,22 @@ If you only need the branch promotion step:
 ```bash
 python3 gitcoach.py doctor --promote-main --promote-source email-fix --push --yes
 ```
+
+## Undo / Rollback
+
+Open guided rollback actions:
+
+```bash
+python3 gitcoach.py undo
+```
+
+Includes:
+
+- Unstage all files
+- Discard unstaged tracked changes (optional safety stash)
+- Undo last commit (keep staged or unstaged changes)
+- Revert a chosen commit
+- Restore one file back to `HEAD`
 
 ## Safety Notes
 
