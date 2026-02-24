@@ -43,6 +43,7 @@ Interactive menu now includes:
 - `Quick guide` (best-practice flow for noobs/vibecoders)
 - `Status snapshot`
 - `Install safety guards`
+- `Draft commit message` helper
 - `Switch branch`
 - `Sync current branch`
 - `Push current branch`
@@ -53,12 +54,35 @@ Core commands:
 ```bash
 python3 gitcoach.py init                  # installs safety guards by default
 python3 gitcoach.py guard                 # install/refresh safety hooks
-python3 gitcoach.py start "my feature"
+python3 gitcoach.py start "my feature"    # carries dirty changes to new branch
+python3 gitcoach.py message               # suggest a good commit message
+python3 gitcoach.py save --guided         # commit with guided message helper
 python3 gitcoach.py save "commit message"
 python3 gitcoach.py undo                  # open undo/rollback actions
 python3 gitcoach.py ship --push
 python3 gitcoach.py doctor
 python3 gitcoach.py interactive
+```
+
+## Commit Message Help
+
+Draft suggestions:
+
+```bash
+python3 gitcoach.py message
+```
+
+Interactive guided writer:
+
+```bash
+python3 gitcoach.py message --guided
+python3 gitcoach.py save --guided
+```
+
+Optional strict check:
+
+```bash
+python3 gitcoach.py save --guided --strict-message
 ```
 
 ## Safety Guards
@@ -81,6 +105,11 @@ If you already have custom hooks and want to overwrite them:
 ```bash
 python3 gitcoach.py guard --force
 ```
+
+Noob-friendly behavior when guards are enabled:
+
+- If `save` is blocked on `main`, `gitcoach` offers to auto-create a feature branch and retries commit there.
+- `start` works even with dirty changes; it carries your work into the feature branch automatically.
 
 ## Contribution Email Fix
 

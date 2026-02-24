@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -326,6 +327,10 @@ def has_untracked_files() -> bool:
     return bool(git("ls-files", "--others", "--exclude-standard").stdout.strip())
 
 
+def worktree_dirty() -> bool:
+    return bool(git("status", "--porcelain", check=False).stdout.strip())
+
+
 def has_parent_commit() -> bool:
     result = git("rev-parse", "--verify", "HEAD~1", check=False)
     return result.returncode == 0
@@ -362,6 +367,55 @@ def create_safety_stash(label: str) -> str | None:
         return None
     ref = git("stash", "list", "-n", "1", "--format=%gd", check=False).stdout.strip()
     return ref or "stash@{0}"
+
+
+def unique_branch_name(base: str) -> str:
+    if not branch_exists(base):
+        return base
+    for i in range(2, 100):
+        candidate = f"{base}-{i}"
+        if not branch_exists(candidate):
+            return candidate
+    return f"{base}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+
+def suggest_feature_branch_from_message(message: str) -> str:
+    subject = message.strip().splitlines()[0].strip() if message.strip() else "work"
+    summary = subject.split(": ", 1)[1] if ": " in subject else subject
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", summary.strip().lower()).strip("-")
+    if not slug:
+        slug = "work"
+    return f"feature/{slug[:48]}"
+
+
+def checkout_branch_with_changes(branch: str, *, autostash: bool = True) -> bool:
+    """Checkout existing branch or create it while carrying local changes.
+
+    Returns True when a temporary stash was used.
+    """
+    if not branch_exists(branch):
+        git("checkout", "-b", branch, capture=False)
+        return False
+
+    attempt = run(["git", "checkout", branch], check=False, capture=False)
+    if attempt.returncode == 0:
+        return False
+
+    if not autostash:
+        raise GitCoachError(
+            f"Could not switch to {branch} with local changes. "
+            "Retry with --autostash."
+        )
+
+    stash_ref = create_safety_stash(f"gitcoach-branch-switch-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    git("checkout", branch, capture=False)
+    if stash_ref:
+        pop = run(["git", "stash", "pop"], check=False, capture=False)
+        if pop.returncode != 0:
+            print("[warn] Stash pop had conflicts. Resolve and continue.")
+        else:
+            print("[ok] Restored local changes after branch switch.")
+    return True
 
 
 def ahead_behind(upstream: str) -> tuple[int, int]:
@@ -653,10 +707,25 @@ def command_guard(args: argparse.Namespace) -> int:
 
 def command_start(args: argparse.Namespace) -> int:
     ensure_git_repo()
-    ensure_clean_worktree()
-
     feature_branch = f"feature/{slugify_feature_name(args.feature_name)}"
     dev_branch = args.dev_branch
+    dirty = worktree_dirty()
+
+    if dirty:
+        current = current_branch()
+        print(
+            f"[info] Detected local changes on {current}. "
+            "Carrying them to feature branch."
+        )
+        created = not branch_exists(feature_branch)
+        used_stash = checkout_branch_with_changes(feature_branch, autostash=args.autostash)
+        if created:
+            print(f"[ok] Created and switched to: {feature_branch}")
+        else:
+            print(f"[ok] Switched to existing branch: {feature_branch}")
+        if used_stash:
+            print("[ok] Used temporary stash to preserve changes during switch.")
+        return 0
 
     if not branch_exists(dev_branch):
         raise GitCoachError(f"Missing {dev_branch} branch. Run: gitcoach init")
@@ -684,6 +753,235 @@ def print_untracked_preview() -> None:
     print("       Use --include-untracked to stage everything.")
 
 
+def staged_files() -> list[str]:
+    result = git("diff", "--cached", "--name-only", check=False)
+    return sorted([line.strip() for line in (result.stdout or "").splitlines() if line.strip()])
+
+
+def infer_commit_type(files: list[str]) -> str:
+    if not files:
+        return "chore"
+
+    def file_kind(path: str) -> str:
+        p = path.lower()
+        parts = p.split("/")
+        name = parts[-1]
+        if p.startswith("docs/") or name.endswith((".md", ".rst", ".txt")):
+            return "docs"
+        if "test" in parts or name.endswith(("_test.py", ".test.js", ".spec.ts", ".spec.js")):
+            return "test"
+        if p.startswith(".github/") or "workflow" in parts:
+            return "ci"
+        if name in {"package-lock.json", "poetry.lock", "yarn.lock", "pnpm-lock.yaml", "cargo.lock"}:
+            return "chore"
+        return "code"
+
+    kinds = {file_kind(path) for path in files}
+    if kinds == {"docs"}:
+        return "docs"
+    if kinds == {"test"}:
+        return "test"
+    if kinds == {"ci"}:
+        return "ci"
+    if kinds == {"chore"}:
+        return "chore"
+    return "feat"
+
+
+def infer_commit_scope(files: list[str]) -> str | None:
+    tops = {path.split("/", 1)[0] for path in files if "/" in path}
+    if len(tops) == 1:
+        scope = next(iter(tops))
+        if scope not in {".github"}:
+            return scope
+    return None
+
+
+def infer_commit_subject(files: list[str]) -> str:
+    commit_type = infer_commit_type(files)
+    scope = infer_commit_scope(files)
+
+    if len(files) == 1:
+        target = files[0]
+    elif scope:
+        target = f"{scope} files"
+    else:
+        target = "project files"
+
+    verbs = {
+        "feat": "update",
+        "fix": "fix",
+        "docs": "document",
+        "test": "add tests for",
+        "chore": "update",
+        "ci": "adjust",
+    }
+    verb = verbs.get(commit_type, "update")
+    prefix = f"{commit_type}({scope})" if scope else commit_type
+    return f"{prefix}: {verb} {target}"
+
+
+def commit_message_warnings(message: str) -> list[str]:
+    warnings: list[str] = []
+    subject = message.strip().splitlines()[0].strip() if message.strip() else ""
+    if not subject:
+        return ["Subject line is empty."]
+    if len(subject) < 12:
+        warnings.append("Subject is very short. Add more context.")
+    if len(subject) > 72:
+        warnings.append("Subject is longer than 72 characters.")
+    if subject.endswith("."):
+        warnings.append("Subject ends with a period; style is usually without trailing punctuation.")
+    if re.search(r"\b(wip|temp|misc|stuff|quick fix)\b", subject, re.IGNORECASE):
+        warnings.append("Subject uses vague wording (wip/temp/misc/stuff).")
+    if not re.match(r"^[a-z]+(\([^)]+\))?: .+", subject):
+        warnings.append("Subject does not follow `type(scope): summary` pattern.")
+    return warnings
+
+
+def write_commit_with_message(message: str) -> None:
+    git_dir = Path(git("rev-parse", "--git-dir").stdout.strip())
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="gitcoach-msg-",
+        suffix=".txt",
+        dir=str(git_dir),
+        delete=False,
+    ) as handle:
+        handle.write(message.rstrip() + "\n")
+        msg_path = handle.name
+
+    try:
+        git("commit", "-F", msg_path)
+    finally:
+        Path(msg_path).unlink(missing_ok=True)
+
+
+def compose_commit_message_guided(files: list[str]) -> str:
+    default_type = infer_commit_type(files)
+    default_scope = infer_commit_scope(files)
+    default_subject = infer_commit_subject(files)
+
+    preview_files = files[:8]
+    preview_lines = [f"staged files: {len(files)}"] + [f"- {item}" for item in preview_files]
+    if len(files) > 8:
+        preview_lines.append(f"... {len(files) - 8} more")
+    print_box("Commit message helper", preview_lines)
+
+    type_options = [
+        "feat - behavior or feature change",
+        "fix - bug fix",
+        "refactor - internal code cleanup",
+        "docs - docs/content updates",
+        "test - tests only",
+        "chore - maintenance and tooling",
+        "ci - pipeline/workflow change",
+    ]
+    picked_type = choose_option("Choose commit type", type_options, allow_cancel=False).split(" - ", 1)[0]
+    scope = prompt_text("Scope (optional)", default=default_scope or None).strip()
+
+    suggested_summary = default_subject.split(": ", 1)[1] if ": " in default_subject else default_subject
+    summary = prompt_text("Summary (imperative, short)", default=suggested_summary, required=True).strip()
+
+    subject = f"{picked_type}({scope}): {summary}" if scope else f"{picked_type}: {summary}"
+
+    body_raw = prompt_text("Optional details (use ';' for bullet splits)").strip()
+    message = subject
+    if body_raw:
+        parts = [item.strip() for item in body_raw.split(";") if item.strip()]
+        if len(parts) > 1:
+            message += "\n\n" + "\n".join(f"- {part}" for part in parts)
+        else:
+            message += "\n\n" + parts[0]
+
+    warnings = commit_message_warnings(message)
+    preview = message.splitlines() or [message]
+    if warnings:
+        preview += ["", "Warnings:"] + [f"- {item}" for item in warnings]
+    print_box("Proposed commit message", preview)
+    if not prompt_confirm("Use this message?", default=True):
+        raise UserCancelled
+    return message
+
+
+def choose_commit_message(
+    *,
+    explicit_message: str | None,
+    guided: bool,
+    files: list[str],
+) -> str:
+    message = (explicit_message or "").strip()
+    if guided or not message:
+        if not is_interactive_tty():
+            raise GitCoachError("No commit message provided. Use --guided in an interactive terminal or pass a message.")
+        return compose_commit_message_guided(files)
+    return message
+
+
+def print_commit_message_hints(files: list[str]) -> None:
+    suggestion = infer_commit_subject(files)
+    print("[info] Suggested subject format:")
+    print(f"       {suggestion}")
+    print("       Example with details:")
+    print(f"       {suggestion}\n")
+    print("       - explain why")
+    print("       - note risk/test impact")
+
+
+def command_message(args: argparse.Namespace) -> int:
+    ensure_git_repo()
+    files = staged_files()
+    if not files:
+        files = changed_tracked_files()
+    if not files:
+        raise GitCoachError("No changed files found. Stage or modify files first.")
+
+    if args.guided:
+        if not is_interactive_tty():
+            raise GitCoachError("--guided requires an interactive terminal.")
+        message = compose_commit_message_guided(files)
+        print("\n" + message)
+        return 0
+
+    print_commit_message_hints(files)
+    return 0
+
+
+def handle_main_commit_block(
+    message: str,
+    err: GitCoachError,
+) -> bool:
+    branch = current_branch()
+    if branch not in {"main", "master"}:
+        return False
+
+    detail = str(err).lower()
+    if "commit blocked" not in detail and "pre-commit hook" not in detail and "main" not in detail:
+        return False
+
+    suggested = unique_branch_name(suggest_feature_branch_from_message(message))
+    if is_interactive_tty():
+        print(
+            f"[warn] Commit on {branch} was blocked by safety guard."
+        )
+        if not prompt_confirm(
+            f"Create {suggested} and commit there instead?",
+            default=True,
+        ):
+            return False
+    else:
+        print(
+            f"[warn] Commit on {branch} was blocked. "
+            f"Auto-creating {suggested} and retrying commit."
+        )
+
+    checkout_branch_with_changes(suggested, autostash=True)
+    write_commit_with_message(message)
+    print(f"[ok] Commit created on {suggested}")
+    return True
+
+
 def command_save(args: argparse.Namespace) -> int:
     ensure_git_repo()
 
@@ -693,11 +991,31 @@ def command_save(args: argparse.Namespace) -> int:
         git("add", "-u", capture=False)
         print_untracked_preview()
 
-    staged = git("diff", "--cached", "--name-only")
-    if not staged.stdout.strip():
+    files = staged_files()
+    if not files:
         raise GitCoachError("No staged tracked changes to commit.")
 
-    git("commit", "-m", args.message, capture=False)
+    message = choose_commit_message(
+        explicit_message=args.message,
+        guided=args.guided,
+        files=files,
+    )
+    warnings = commit_message_warnings(message)
+    if warnings:
+        print("[warn] Commit message quality hints:")
+        for item in warnings:
+            print(f"       - {item}")
+        if args.strict_message:
+            raise GitCoachError("Commit message did not pass --strict-message checks.")
+        if is_interactive_tty() and not prompt_confirm("Commit anyway?", default=True):
+            raise UserCancelled
+
+    try:
+        write_commit_with_message(message)
+    except GitCoachError as err:
+        if handle_main_commit_block(message, err):
+            return 0
+        raise
     print("[ok] Commit created")
     return 0
 
@@ -1229,14 +1547,36 @@ def run_interactive_start_feature() -> None:
     ensure_git_repo()
     feature_name = prompt_text("Feature name", required=True)
     dev_branch = prompt_text("Dev branch", default="dev", required=True)
-    command_start(argparse.Namespace(feature_name=feature_name, dev_branch=dev_branch))
+    autostash = prompt_confirm("Auto-stash if branch switch needs it?", default=True)
+    command_start(
+        argparse.Namespace(
+            feature_name=feature_name,
+            dev_branch=dev_branch,
+            autostash=autostash,
+        )
+    )
 
 
 def run_interactive_save_commit() -> None:
     ensure_git_repo()
-    message = prompt_text("Commit message", required=True)
     include_untracked = prompt_confirm("Include untracked files?", default=False)
-    command_save(argparse.Namespace(message=message, include_untracked=include_untracked))
+    guided = prompt_confirm("Use commit message helper?", default=True)
+    message = None
+    if not guided:
+        message = prompt_text("Commit message", required=True)
+    command_save(
+        argparse.Namespace(
+            message=message,
+            include_untracked=include_untracked,
+            guided=guided,
+            strict_message=False,
+        )
+    )
+
+
+def run_interactive_draft_commit_message() -> None:
+    ensure_git_repo()
+    command_message(argparse.Namespace(guided=True))
 
 
 def run_interactive_ship() -> None:
@@ -1540,6 +1880,7 @@ def command_interactive(_args: argparse.Namespace) -> int:
         "Switch branch",
         "Sync current branch",
         "Push current branch",
+        "Draft commit message",
         "Start feature branch",
         "Save commit",
         "Ship dev -> main",
@@ -1556,6 +1897,7 @@ def command_interactive(_args: argparse.Namespace) -> int:
         "Switch branch": run_interactive_switch_branch,
         "Sync current branch": run_interactive_sync_current_branch,
         "Push current branch": run_interactive_push_current_branch,
+        "Draft commit message": run_interactive_draft_commit_message,
         "Start feature branch": run_interactive_start_feature,
         "Save commit": run_interactive_save_commit,
         "Ship dev -> main": run_interactive_ship,
@@ -1737,12 +2079,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = subparsers.add_parser("start", help="Start a feature branch from dev.")
     p_start.add_argument("feature_name")
     p_start.add_argument("--dev-branch", default="dev")
+    p_start.add_argument(
+        "--autostash",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When local changes block switching, stash/pop automatically.",
+    )
     p_start.set_defaults(func=command_start)
 
     p_save = subparsers.add_parser("save", help="Commit tracked changes safely.")
-    p_save.add_argument("message")
+    p_save.add_argument("message", nargs="?")
     p_save.add_argument("--include-untracked", action="store_true")
+    p_save.add_argument(
+        "--guided",
+        action="store_true",
+        help="Use guided commit message helper.",
+    )
+    p_save.add_argument(
+        "--strict-message",
+        action="store_true",
+        help="Fail commit when message quality warnings are detected.",
+    )
     p_save.set_defaults(func=command_save)
+
+    p_message = subparsers.add_parser(
+        "message",
+        help="Draft helpful commit message suggestions from changed files.",
+    )
+    p_message.add_argument(
+        "--guided",
+        action="store_true",
+        help="Open interactive message composer and print resulting message.",
+    )
+    p_message.set_defaults(func=command_message)
 
     p_ship = subparsers.add_parser("ship", help="Fast-forward dev into main.")
     p_ship.add_argument("--main-branch", default="main")
