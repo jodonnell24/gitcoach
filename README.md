@@ -11,7 +11,7 @@ Small, opinionated Git helper for solo developers.
 - Keeping `dev` and `main` separated without extra ceremony
 - Avoiding accidental commits of untracked files
 - Switching between safety profiles (`solo-safe`, `fast`, `strict`) without editing hooks manually
-- Safe undo/rollback actions without scary git commands
+- Safe undo/rollback actions without memorizing low-level Git commands
 - Shipping safely with fast-forward merges
 - Diagnosing and fixing GitHub contributions issues caused by wrong commit email
 
@@ -82,17 +82,23 @@ python3 gitcoach.py interactive
 
 ## Installation
 
-From PyPI:
+Install directly from GitHub:
 
 ```bash
-pipx install gitcoach
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install git+https://github.com/jodonnell24/gitcoach.git
 ```
 
-From local checkout:
+Or install from a local checkout:
 
 ```bash
-pipx install .
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -e .
 ```
+
+The `gitcoach` name on PyPI currently belongs to an unrelated older project, so avoid `pip install gitcoach` for this repo until a package name is published for this implementation.
 
 ## Commit Message Help
 
@@ -117,10 +123,12 @@ python3 gitcoach.py save --guided --strict-message
 
 ## 60-Second Quickstart
 
-Install with pipx:
+Install from GitHub:
 
 ```bash
-pipx install gitcoach
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install git+https://github.com/jodonnell24/gitcoach.git
 ```
 
 Try a safe beginner flow:
@@ -172,7 +180,7 @@ If you already have custom hooks and want to overwrite them:
 python3 gitcoach.py guard --force
 ```
 
-Noob-friendly behavior when guards are enabled:
+Beginner-friendly behavior when guards are enabled:
 
 - If `save` is blocked on `main`, `gitcoach` offers to auto-create a feature branch and retries commit there.
 - `start` works even with dirty changes; it carries your work into the feature branch automatically.
@@ -292,6 +300,21 @@ Includes:
 - Undo last commit (keep staged or unstaged changes)
 - Revert a chosen commit
 - Restore one file back to `HEAD`
+
+## Development
+
+Install the package with development tools, then run the test suite:
+
+```bash
+python3 -m pip install -e ".[dev]" build
+python3 -m pytest
+```
+
+Build package artifacts locally with:
+
+```bash
+python3 -m build
+```
 
 ## Safety Notes
 
